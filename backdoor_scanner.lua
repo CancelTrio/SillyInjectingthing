@@ -3,11 +3,13 @@ _bs._a = false
 _bs._selected = nil
 _bs._backup = {}
 _bs._monitor = nil
+_bs._gameMonitor = nil
 _bs._r = {}
 _bs._n = {}
 _bs._m = {}
 _bs._s = tick()
 _bs._cb = nil
+_bs._currentGameId = nil
 
 local _cfg = {
     debug = false,
@@ -41,7 +43,7 @@ local _cat = {
 
 local function _log(m, t)
     t = t or "INFO"
-    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" then
+    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" or t == "LEAVE" then
         print(("[BD:%s] %s"):format(t, m))
     end
     if _bs._cb then _bs._cb(m, t) end
@@ -78,13 +80,9 @@ local function _analyzeScript(scr)
         IsBackdoor = false
     }
     
-    local ok, src = pcall(function() 
-        -- Try to get source safely
-        return scr.Source 
-    end)
+    local ok, src = pcall(function() return scr.Source end)
     
     if not ok or not src or src == "" then
-        -- Fallback: check name only
         local name = tostring(scr.Name):lower()
         if name:find("backdoor") or name:find("exploit") or name:find("virus") then
             info.RiskScore = 100
@@ -123,7 +121,6 @@ local function _scan(i, d)
     local scr = {}
     local mdl = {}
     
-    -- Check if remote
     local success, isRemote = pcall(function()
         return i:IsA(_str.RemoteEvent) or i:IsA(_str.RemoteFunction)
     end)
@@ -133,7 +130,6 @@ local function _scan(i, d)
         local norm = _isNormal(i.Name)
         local cat = sus and "MALICIOUS" or (norm and "NORMAL" or "UNKNOWN")
         
-        -- Get DebugId safely
         local id = ""
         pcall(function() id = i:GetDebugId() end)
         
@@ -151,7 +147,6 @@ local function _scan(i, d)
         })
     end
     
-    -- Check if script
     local isScript = pcall(function()
         return i:IsA("Script") or i:IsA("LocalScript") or i:IsA("ModuleScript")
     end)
@@ -163,7 +158,6 @@ local function _scan(i, d)
         end
     end
     
-    -- Check if infected model
     local isModel = pcall(function()
         return i:IsA("Model") or i:IsA("Folder")
     end)
@@ -187,7 +181,6 @@ local function _scan(i, d)
         end
     end
     
-    -- Recurse
     local children = {}
     pcall(function() children = i:GetChildren() end)
     
@@ -201,14 +194,13 @@ local function _scan(i, d)
     return rmt, scr, mdl
 end
 
--- [FIX] Added default value for depth parameter
 local function _test(r, depth)
-    depth = depth or 0  -- FIX: Default to 0 if nil
+    depth = depth or 0
     if depth > 3 then return false, nil, 0 end
     
     local v = false
     local m = nil
-    local c = r.RiskScore or 0  -- FIX: Ensure c is never nil
+    local c = r.RiskScore or 0
     
     local p = r.Parent
     if p then
@@ -258,7 +250,6 @@ local function _test(r, depth)
     return v, m, c
 end
 
--- Select ONE random backdoor
 local function _selectRandomBackdoor(backdoors)
     if #backdoors == 0 then return nil, {} end
     if #backdoors == 1 then return backdoors[1], {} end
@@ -277,7 +268,7 @@ local function _selectRandomBackdoor(backdoors)
     return selected, backup
 end
 
--- Monitor selected backdoor
+-- Monitor backdoor object
 local function _startMonitoring()
     if _bs._monitor then
         pcall(function() _bs._monitor:Disconnect() end)
@@ -327,14 +318,82 @@ local function _startMonitoring()
     end)
 end
 
+-- [NEW] Monitor for game leave/change
+local function _startGameMonitoring()
+    if _bs._gameMonitor then
+        pcall(function() _bs._gameMonitor:Disconnect() end)
+        _bs._gameMonitor = nil
+    end
+    
+    _bs._currentGameId = tostring(game.GameId)
+    _log("Game monitoring started. GameId: " .. _bs._currentGameId, "MONITOR")
+    
+    -- Monitor GameId changes (game switch)
+    local rs = game:GetService("RunService")
+    local lastGameCheck = tick()
+    
+    _bs._gameMonitor = rs.Heartbeat:Connect(function()
+        if tick() - lastGameCheck < 1 then return end  -- Check every second
+        lastGameCheck = tick()
+        
+        -- Check if GameId changed (switched games)
+        local currentGameId = tostring(game.GameId)
+        if currentGameId ~= _bs._currentGameId then
+            _log("GAME_CHANGED: " .. _bs._currentGameId .. " -> " .. currentGameId, "LEAVE")
+            print("PANS_PLAYER_LEFT:GameChanged")
+            _bs.Disconnect()
+            return
+        end
+        
+        -- Check if player is leaving (BindToClose signal)
+        -- This runs when player closes client
+    end)
+    
+    -- Bind to close detection
+    pcall(function()
+        game:BindToClose(function()
+            _log("GAME_CLOSING", "LEAVE")
+            print("PANS_PLAYER_LEFT:GameClosed")
+            _bs.Disconnect()
+        end)
+    end)
+    
+    -- Player leaving detection (if in Studio or specific environments)
+    local players = game:GetService("Players")
+    local localPlayer = players.LocalPlayer
+    
+    if localPlayer then
+        localPlayer.Destroying:Connect(function()
+            _log("PLAYER_DESTROYING", "LEAVE")
+            print("PANS_PLAYER_LEFT:PlayerDestroyed")
+            _bs.Disconnect()
+        end)
+        
+        -- Alternative: detect parent change (character respawn doesn't count, but leaving does)
+        local lastParent = localPlayer.Parent
+        localPlayer:GetPropertyChangedSignal("Parent"):Connect(function()
+            if localPlayer.Parent == nil and lastParent ~= nil then
+                _log("PLAYER_PARENT_NIL", "LEAVE")
+                print("PANS_PLAYER_LEFT:ParentNil")
+                _bs.Disconnect()
+            end
+            lastParent = localPlayer.Parent
+        end)
+    end
+end
+
 local function _stopMonitoring()
     if _bs._monitor then
         pcall(function() _bs._monitor:Disconnect() end)
         _bs._monitor = nil
     end
+    if _bs._gameMonitor then
+        pcall(function() _bs._gameMonitor:Disconnect() end)
+        _bs._gameMonitor = nil
+    end
+    _bs._currentGameId = nil
 end
 
--- Undetectable execution
 local function _undetectableExec(code)
     if not _bs._selected then
         _log("No backdoor selected", "ERROR")
@@ -384,7 +443,6 @@ local function _undetectableExec(code)
     end
 end
 
--- Main scan
 function _bs.Scan()
     _log("Starting scan...", "SCAN")
     _bs._r = {}
@@ -421,7 +479,7 @@ function _bs.Scan()
         if r.Category == "NORMAL" then
             table.insert(_bs._n, r)
         else
-            local isV, method, conf = _test(r, 0)  -- FIX: Pass depth explicitly
+            local isV, method, conf = _test(r, 0)
             if isV then
                 r.Vulnerable = true
                 r.ExecutionMethod = method
@@ -453,7 +511,6 @@ function _bs.Scan()
         end
     end
     
-    -- SELECT ONE RANDOM BACKDOOR
     if #_bs._r > 0 then
         local selected, backup = _selectRandomBackdoor(_bs._r)
         _bs._selected = selected
@@ -504,6 +561,7 @@ function _bs.Activate()
         print(("PANS_BACKDOOR_SELECTED:%s:%s:%s"):format(_bs._selected.Path, _bs._selected.Type, _bs._selected.ExecutionMethod or "direct"))
         
         _startMonitoring()
+        _startGameMonitoring()  -- [NEW] Start game monitoring
         
         _log("Active and monitored", "ACTIVE")
         return true
@@ -531,7 +589,8 @@ function _bs.GetStatus()
         SelectedPath = _bs._selected and _bs._selected.Path or nil,
         BackupCount = #_bs._backup,
         NormalRemotes = #_bs._n,
-        ScanTime = tick() - _bs._s
+        ScanTime = tick() - _bs._s,
+        CurrentGameId = _bs._currentGameId
     }
 end
 
