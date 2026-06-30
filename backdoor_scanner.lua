@@ -1,10 +1,3 @@
---[[
-    PanScript Backdoor System v7.0 - MERGED COMPLETE
-    - Full backdoor API with scanning, execution, monitoring
-    - Internal Backup GUI for when external manager fails
-    - C# compatible with all required functions
-]]
-
 local _bs = {}
 _bs._a = false
 _bs._selected = nil
