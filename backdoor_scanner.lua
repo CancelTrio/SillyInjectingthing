@@ -1,8 +1,3 @@
---[[
-    PanScript Backdoor System v6.0
-    - Internal Backup GUI if external manager fails
-]]
-
 local _bs = {}
 _bs._a = false
 _bs._selected = nil
