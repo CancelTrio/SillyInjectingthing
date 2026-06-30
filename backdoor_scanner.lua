@@ -1,9 +1,3 @@
---[[
-    PanScript Backdoor System v6.1 - COMPLETE FIXED
-    - Internal Backup GUI if external manager fails
-    - All functions included for C# and in-game compatibility
-]]
-
 local _bs = {}
 _bs._a = false
 _bs._selected = nil
