@@ -81,7 +81,6 @@ local function _getSource(obj)
     if not obj then return nil end
     local s, r = pcall(function()
         if obj:IsA("LocalScript") or obj:IsA("ModuleScript") then
-            -- Try to get source
             if obj.Source then return obj.Source end
         end
         return nil
@@ -100,31 +99,26 @@ local function _analyzeScript(obj)
     local score = 0
     local reasons = {}
     
-    -- Check malicious patterns
     if _hasPattern(source, MALICIOUS_PATTERNS) then
         score = score + 40
         table.insert(reasons, "Malicious patterns detected")
     end
     
-    -- Check suspicious patterns
     if _hasPattern(source, SUSPICIOUS_PATTERNS) then
         score = score + 20
         table.insert(reasons, "Suspicious patterns detected")
     end
     
-    -- Check for obfuscation
     if string.len(source) > 5000 and string.find(source, "[%z\001-\008\011-\012\014-\031]") then
         score = score + 30
         table.insert(reasons, "Possible obfuscation")
     end
     
-    -- Network activity
     if string.find(source, "http") or string.find(source, "request") then
         score = score + 25
         table.insert(reasons, "Network activity")
     end
     
-    -- Determine category
     local category = CATEGORIES.NORMAL
     if score >= 70 then
         category = CATEGORIES.MALICIOUS
@@ -147,6 +141,47 @@ local function _analyzeScript(obj)
     }
 end
 
+-- [FIXED] Initialize function - C# calls this
+function _bs.Initialize(callback, options)
+    _bs._cb = callback
+    options = options or {}
+    
+    if options.debug then
+        _log("Backdoor scanner initialized", "INIT")
+    end
+    
+    -- Clear storage if requested
+    if options.clearStorage then
+        _storage.detectedBackdoors = {}
+    end
+    
+    return true
+end
+
+-- [FIXED] Execute function - C# calls this to run code through backdoor
+function _bs.Execute(code)
+    if not code or type(code) ~= "string" then
+        _log("Invalid code provided to Execute", "ERROR")
+        return false
+    end
+    
+    local success, result = pcall(function()
+        local fn, err = loadstring(code)
+        if not fn then
+            error("Loadstring failed: " .. tostring(err))
+        end
+        return fn()
+    end)
+    
+    if success then
+        _log("Code executed successfully", "EXEC")
+        return true
+    else
+        _log("Execution failed: " .. tostring(result), "ERROR")
+        return false
+    end
+end
+
 -- Scan all scripts
 function _bs.Scan()
     _log("Starting backdoor scan...", "SCAN")
@@ -154,7 +189,7 @@ function _bs.Scan()
     local normalCount = 0
     
     local function scanContainer(container, depth)
-        if depth > 10 then return end -- Prevent infinite recursion
+        if depth > 10 then return end
         
         for _, child in ipairs(container:GetChildren()) do
             if child:IsA("LocalScript") or child:IsA("ModuleScript") then
@@ -169,12 +204,10 @@ function _bs.Scan()
                 end
             end
             
-            -- Scan children
             if #child:GetChildren() > 0 then
                 scanContainer(child, depth + 1)
             end
             
-            -- Scan descendants that are scripts
             for _, desc in ipairs(child:GetDescendants()) do
                 if desc:IsA("LocalScript") or desc:IsA("ModuleScript") then
                     local result = _analyzeScript(desc)
@@ -189,7 +222,6 @@ function _bs.Scan()
         end
     end
     
-    -- Scan common locations
     local locations = {
         game:GetService("Players"),
         game:GetService("ReplicatedStorage"),
@@ -214,13 +246,12 @@ function _bs.GetAllDetected()
         table.insert(all, bd)
     end
     
-    -- Sort by confidence (highest first)
     table.sort(all, function(a, b) return a.Confidence > b.Confidence end)
     
     return all
 end
 
--- Execute backdoor
+-- [FIXED] Returns boolean for C# compatibility
 function _bs.ActivateSpecific(path, category)
     _log(string.format("Activating backdoor: %s [%s]", path, category), "EXEC")
     
@@ -229,10 +260,8 @@ function _bs.ActivateSpecific(path, category)
         return false, "Backdoor not found in storage"
     end
     
-    -- Try to get the actual object
     local obj = bd.Object
     if not obj or not obj.Parent then
-        -- Try to find it again
         local parts = string.split(path, ".")
         obj = game
         for _, part in ipairs(parts) do
@@ -246,16 +275,13 @@ function _bs.ActivateSpecific(path, category)
         return false, "Object no longer exists"
     end
     
-    -- Execute based on type
     local success, result = pcall(function()
         if category == CATEGORIES.MALICIOUS or category == CATEGORIES.BACKDOORED_FUNC then
-            -- Try to require if it's a module
             if obj:IsA("ModuleScript") then
                 local mod = require(obj)
                 if type(mod) == "function" then
                     return mod()
                 elseif type(mod) == "table" then
-                    -- Look for common backdoor function names
                     for name, func in pairs(mod) do
                         if type(func) == "function" and (
                             string.find(name:lower(), "backdoor") or
@@ -269,7 +295,6 @@ function _bs.ActivateSpecific(path, category)
                 end
             end
             
-            -- Try to get source and loadstring
             local source = _getSource(obj)
             if source and string.len(source) > 0 then
                 local fn, err = loadstring(source)
@@ -281,12 +306,10 @@ function _bs.ActivateSpecific(path, category)
             end
             
         elseif category == CATEGORIES.SUSPICIOUS then
-            -- Safer execution for suspicious items
             _log("Suspicious item - manual review recommended", "WARN")
             return "Suspicious - manual execution required"
             
         elseif category == CATEGORIES.INFECTED_SCRIPT then
-            -- Try to clean/execute
             _log("Attempting to execute infected script", "EXEC")
             local source = _getSource(obj)
             if source then
@@ -307,7 +330,7 @@ function _bs.ActivateSpecific(path, category)
     end
 end
 
--- Create Internal Manager GUI (backup when external fails)
+-- Create Internal Manager GUI
 local function _createInternalManager(allBackdoors, callback)
     if _bs._internalManagerGUI then
         pcall(function() _bs._internalManagerGUI:Destroy() end)
@@ -328,7 +351,6 @@ local function _createInternalManager(allBackdoors, callback)
     
     _bs._internalManagerGUI = screenGui
     
-    -- Main Frame
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "ManagerFrame"
     mainFrame.Size = UDim2.new(0, 600, 0, 450)
@@ -343,7 +365,6 @@ local function _createInternalManager(allBackdoors, callback)
     corner.CornerRadius = UDim.new(0, 10)
     corner.Parent = mainFrame
     
-    -- Title
     local titleBar = Instance.new("Frame")
     titleBar.Size = UDim2.new(1, 0, 0, 40)
     titleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
@@ -372,7 +393,6 @@ local function _createInternalManager(allBackdoors, callback)
     titleText.TextXAlignment = Enum.TextXAlignment.Left
     titleText.Parent = titleBar
     
-    -- Note
     local noteText = Instance.new("TextLabel")
     noteText.Size = UDim2.new(1, -20, 0, 30)
     noteText.Position = UDim2.new(0, 10, 0, 45)
@@ -384,7 +404,6 @@ local function _createInternalManager(allBackdoors, callback)
     noteText.TextWrapped = true
     noteText.Parent = mainFrame
     
-    -- Scrolling Frame
     local scrollFrame = Instance.new("ScrollingFrame")
     scrollFrame.Size = UDim2.new(1, -20, 1, -130)
     scrollFrame.Position = UDim2.new(0, 10, 0, 80)
@@ -398,7 +417,6 @@ local function _createInternalManager(allBackdoors, callback)
     scrollCorner.CornerRadius = UDim.new(0, 6)
     scrollCorner.Parent = scrollFrame
     
-    -- Create buttons
     local selectedBackdoor = nil
     
     for i, bd in ipairs(allBackdoors) do
@@ -431,7 +449,6 @@ local function _createInternalManager(allBackdoors, callback)
         end)
     end
     
-    -- Buttons
     local confirmBtn = Instance.new("TextButton")
     confirmBtn.Size = UDim2.new(0.45, -10, 0, 35)
     confirmBtn.Position = UDim2.new(0.05, 0, 1, -45)
@@ -460,7 +477,6 @@ local function _createInternalManager(allBackdoors, callback)
     btnCorner2.CornerRadius = UDim.new(0, 6)
     btnCorner2.Parent = cancelBtn
     
-    -- Handlers
     confirmBtn.MouseButton1Click:Connect(function()
         if selectedBackdoor then
             screenGui:Destroy()
@@ -523,11 +539,5 @@ function _bs.ScanWithManager(useInternal)
         return true, "External manager"
     end
 end
-
--- Auto-scan on load
-spawn(function()
-    wait(2)
-    _bs.Scan()
-end)
 
 return _bs
