@@ -1,3 +1,9 @@
+--[[
+    PanScript Backdoor System v6.1 - COMPLETE FIXED
+    - Internal Backup GUI if external manager fails
+    - All functions included for C# and in-game compatibility
+]]
+
 local _bs = {}
 _bs._a = false
 _bs._selected = nil
@@ -29,31 +35,19 @@ local _storage = _G._pans_backdoor_storage
 -- Categories
 local CATEGORIES = {
     MALICIOUS = "MALICIOUS",
-    SUSPICIOUS = "SUSPICIOUS", 
+    SUSPICIOUS = "SUSPICIOUS",
     BACKDOORED_FUNC = "BACKDOORED_FUNC",
     INFECTED_SCRIPT = "INFECTED_SCRIPT",
     NORMAL = "NORMAL"
 }
 
--- Logging
+-- [ADDED] Logging function
 local function _log(msg, level)
     level = level or "INFO"
     print(string.format("[PanScript %s] %s", level, msg))
 end
 
--- Get color for category
-function GetCategoryColor(category)
-    local colors = {
-        MALICIOUS = Color3.fromRGB(255, 80, 80),
-        SUSPICIOUS = Color3.fromRGB(255, 220, 80),
-        BACKDOORED_FUNC = Color3.fromRGB(255, 140, 40),
-        INFECTED_SCRIPT = Color3.fromRGB(200, 100, 255),
-        NORMAL = Color3.fromRGB(80, 255, 120)
-    }
-    return colors[category] or Color3.fromRGB(150, 150, 150)
-end
-
--- String pattern detection
+-- [ADDED] String pattern detection
 local function _hasPattern(s, patterns)
     for _, p in ipairs(patterns) do
         if string.find(s, p) then return true end
@@ -61,7 +55,7 @@ local function _hasPattern(s, patterns)
     return false
 end
 
--- Malicious patterns
+-- [ADDED] Pattern databases
 local MALICIOUS_PATTERNS = {
     "loadstring", "game:HttpGet", "http.request", "syn.request",
     "setclipboard", "keylogger", "steal", "grab", "webhook",
@@ -70,13 +64,12 @@ local MALICIOUS_PATTERNS = {
     "islclosure", "checkcaller", "getconnections", "firesignal"
 }
 
--- Suspicious patterns
 local SUSPICIOUS_PATTERNS = {
     "require", "spawn", "pcall", "xpcall", "coroutine",
     "while true do", "repeat until", "for.*do.*end"
 }
 
--- Get script source
+-- [ADDED] Get script source safely
 local function _getSource(obj)
     if not obj then return nil end
     local s, r = pcall(function()
@@ -89,7 +82,7 @@ local function _getSource(obj)
     return nil
 end
 
--- Analyze script for backdoors
+-- [ADDED] Analyze script for backdoors
 local function _analyzeScript(obj)
     local source = _getSource(obj)
     if not source then 
@@ -141,48 +134,7 @@ local function _analyzeScript(obj)
     }
 end
 
--- [FIXED] Initialize function - C# calls this
-function _bs.Initialize(callback, options)
-    _bs._cb = callback
-    options = options or {}
-    
-    if options.debug then
-        _log("Backdoor scanner initialized", "INIT")
-    end
-    
-    -- Clear storage if requested
-    if options.clearStorage then
-        _storage.detectedBackdoors = {}
-    end
-    
-    return true
-end
-
--- [FIXED] Execute function - C# calls this to run code through backdoor
-function _bs.Execute(code)
-    if not code or type(code) ~= "string" then
-        _log("Invalid code provided to Execute", "ERROR")
-        return false
-    end
-    
-    local success, result = pcall(function()
-        local fn, err = loadstring(code)
-        if not fn then
-            error("Loadstring failed: " .. tostring(err))
-        end
-        return fn()
-    end)
-    
-    if success then
-        _log("Code executed successfully", "EXEC")
-        return true
-    else
-        _log("Execution failed: " .. tostring(result), "ERROR")
-        return false
-    end
-end
-
--- Scan all scripts
+-- [ADDED] Scan function
 function _bs.Scan()
     _log("Starting backdoor scan...", "SCAN")
     local found = {}
@@ -239,7 +191,7 @@ function _bs.Scan()
     return #found > 0, normalCount, found
 end
 
--- Get all detected backdoors
+-- [ADDED] Get all detected backdoors
 function _bs.GetAllDetected()
     local all = {}
     for _, bd in pairs(_storage.detectedBackdoors) do
@@ -251,7 +203,7 @@ function _bs.GetAllDetected()
     return all
 end
 
--- [FIXED] Returns boolean for C# compatibility
+-- [ADDED] Activate specific backdoor
 function _bs.ActivateSpecific(path, category)
     _log(string.format("Activating backdoor: %s [%s]", path, category), "EXEC")
     
@@ -330,7 +282,47 @@ function _bs.ActivateSpecific(path, category)
     end
 end
 
--- Create Internal Manager GUI
+-- [ADDED] Initialize function for C# compatibility
+function _bs.Initialize(callback, options)
+    _bs._cb = callback
+    options = options or {}
+    
+    if options.debug then
+        _log("Backdoor scanner initialized", "INIT")
+    end
+    
+    if options.clearStorage then
+        _storage.detectedBackdoors = {}
+    end
+    
+    return true
+end
+
+-- [ADDED] Execute function for C# compatibility
+function _bs.Execute(code)
+    if not code or type(code) ~= "string" then
+        _log("Invalid code provided to Execute", "ERROR")
+        return false
+    end
+    
+    local success, result = pcall(function()
+        local fn, err = loadstring(code)
+        if not fn then
+            error("Loadstring failed: " .. tostring(err))
+        end
+        return fn()
+    end)
+    
+    if success then
+        _log("Code executed successfully", "EXEC")
+        return true, result
+    else
+        _log("Execution failed: " .. tostring(result), "ERROR")
+        return false, tostring(result)
+    end
+end
+
+-- [KEPT] Create Internal Manager GUI (backup when external fails)
 local function _createInternalManager(allBackdoors, callback)
     if _bs._internalManagerGUI then
         pcall(function() _bs._internalManagerGUI:Destroy() end)
@@ -397,7 +389,7 @@ local function _createInternalManager(allBackdoors, callback)
     noteText.Size = UDim2.new(1, -20, 0, 30)
     noteText.Position = UDim2.new(0, 10, 0, 45)
     noteText.BackgroundTransparency = 1
-    noteText.Text = "⚠️ External manager blocked! Using internal backup."
+    noteText.Text = "⚠️ External manager blocked! Using internal backup. Suspicious items may not have executable code."
     noteText.TextColor3 = Color3.fromRGB(255, 200, 100)
     noteText.Font = Enum.Font.Gotham
     noteText.TextSize = 11
@@ -440,6 +432,7 @@ local function _createInternalManager(allBackdoors, callback)
         
         btn.MouseButton1Click:Connect(function()
             selectedBackdoor = bd
+            
             for _, child in ipairs(scrollFrame:GetChildren()) do
                 if child:IsA("TextButton") then
                     child.BackgroundTransparency = 0.7
@@ -500,9 +493,21 @@ local function _createInternalManager(allBackdoors, callback)
     _log("Internal Manager GUI created (backup mode)", "GUI")
 end
 
--- Scan with internal GUI fallback
+-- [KEPT] GetCategoryColor function
+function GetCategoryColor(category)
+    local colors = {
+        MALICIOUS = Color3.fromRGB(255, 80, 80),
+        SUSPICIOUS = Color3.fromRGB(255, 220, 80),
+        BACKDOORED_FUNC = Color3.fromRGB(255, 140, 40),
+        INFECTED_SCRIPT = Color3.fromRGB(200, 100, 255),
+        NORMAL = Color3.fromRGB(80, 255, 120)
+    }
+    return colors[category] or Color3.fromRGB(150, 150, 150)
+end
+
+-- [KEPT] Scan with internal GUI fallback
 function _bs.ScanWithManager(useInternal)
-    local found, normalCount, backdoors = _bs.Scan()
+    local found, normalCount = _bs.Scan()
     
     if not found then
         return false, "No backdoors found"
